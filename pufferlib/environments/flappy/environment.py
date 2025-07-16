@@ -108,11 +108,14 @@ class Flappy(pufferlib.PufferEnv):
         # For simplicity, we'll always draw the agent in the first column
         grid[self.agent_pos][0] = 'A'
 
-        # Print the grid to the console
-        print('+' + '-' * self.grid_width + '+')
+        # Build the grid as a string and return it
+        output = []
+        output.append('+' + '-' * self.grid_width + '+')
         for row in grid:
-            print('|' + ''.join(row) + '|')
-        print('+' + '-' * self.grid_width + '+')
+            output.append('|' + ''.join(row) + '|')
+        output.append('+' + '-' * self.grid_width + '+')
+        
+        return '\n'.join(output)
 
     def close(self):
         # This is for any cleanup when the environment is closed
