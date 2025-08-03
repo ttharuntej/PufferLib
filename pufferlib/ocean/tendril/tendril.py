@@ -9,6 +9,7 @@ Based on mover.md specifications:
 
 import numpy as np
 import gymnasium
+from gymnasium.wrappers import FrameStack
 
 import pufferlib
 from pufferlib.ocean.tendril import binding
@@ -113,7 +114,40 @@ class Tendril(pufferlib.PufferEnv):
         # For now, targets are set randomly in c_reset()
         pass
 
-# Convenience function for creating environment
+# Frame stacking wrapper for temporal perception (Action Item 3)
+def make_tendril_env_with_frame_stack(num_stack=4):
+    """
+    Create Tendril environment with frame stacking for temporal perception.
+    
+    This implementation provides the agent with a short history of observations,
+    allowing it to infer velocity and momentum patterns naturally, which leads
+    to smoother and more coordinated control policies.
+    
+    Args:
+        num_stack (int): Number of frames to stack (default: 4)
+        
+    Returns:
+        Wrapped environment with stacked observations
+        
+    Technical Details:
+        - Observation shape changes: (17,) -> (4, 17)
+        - PufferLib automatically adapts neural network input layer
+        - Memory overhead: 4x observation storage (minimal for 17D space)
+        - Proven approach for temporal control tasks in RL literature
+    """
+    def env_creator():
+        # 1. Create base Tendril environment
+        env = Tendril(num_envs=1, render_mode=None)  # Headless for training
+        
+        # 2. Apply frame stacking wrapper
+        # This gives the agent "temporal vision" to see motion patterns
+        env = FrameStack(env, num_stack=num_stack)
+        
+        return env
+    
+    return env_creator
+
+# Convenience function for creating environment  
 def make_env(num_envs=1, **kwargs):
     """Create Tendril environment with default settings"""
     return Tendril(num_envs=num_envs, **kwargs)

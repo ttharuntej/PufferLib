@@ -158,6 +158,10 @@ struct Tendril {
     float last_end_effector_pos[3]; // For movement tracking [x,y,z]
     float movement_sample_time;    // For velocity sampling
     
+    // Action consistency tracking (for smoothness penalty)
+    float last_actions[NUM_JOINTS];          // Previous step's actions
+    float smoothed_velocities[NUM_JOINTS];   // Exponentially smoothed velocities
+    
     // Hardware simulation parameters (from real-to-sim calibration)
     float servo_backlash[NUM_JOINTS];   // Servo deadband (radians)
     float friction_coeffs[NUM_JOINTS];  // Joint friction
@@ -403,12 +407,27 @@ float compute_reward(Tendril* env) {
         reward += 10.0f; // Reduced from 50.0f - less overwhelming
     }
 
-    // 3. Small penalty for excessive movement (optional)
-    float total_velocity = 0.0f;
+    // 3. Time penalty - creates "cost of living" that encourages efficiency
+    reward -= 0.01f;  // Fixed time penalty per timestep
+    
+    // 4. Action consistency penalty (targets root cause of jerkiness)
+    float action_consistency_penalty = 0.0f;
     for (int i = 0; i < NUM_JOINTS; i++) {
-        total_velocity += fabsf(env->joint_velocities[i]);
+        float action_change = fabsf(env->actions[i] - env->last_actions[i]);
+        action_consistency_penalty += action_change;
     }
-    reward -= total_velocity * 0.001f; // Reduced penalty - allow movement
+    reward -= action_consistency_penalty * 0.02f;  // Penalize erratic actions
+
+    // 5. Velocity smoothness bonus (reward coordinated movements)  
+    float total_smoothed_velocity = 0.0f;
+    for (int i = 0; i < NUM_JOINTS; i++) {
+        total_smoothed_velocity += fabsf(env->smoothed_velocities[i]);
+    }
+    // Reward moderate, consistent velocity (not too fast, not too slow)
+    float ideal_velocity = 1.0f; // rad/s total across all joints
+    float velocity_deviation = fabsf(total_smoothed_velocity - ideal_velocity);
+    float smoothness_bonus = fmaxf(0.0f, 1.0f - velocity_deviation) * 0.5f;
+    reward += smoothness_bonus;
 
     // NOTE: State updates moved to c_step() for cleaner separation of concerns
     return reward;

@@ -1,5 +1,4 @@
 solid End_Cap_with_Holes_Fixed
-  // --- BOTTOM FACE (Rebuilt around the hole) ---
   facet normal 0 0 -1
     outer loop
       vertex -15 15 0
@@ -43,7 +42,6 @@ solid End_Cap_with_Holes_Fixed
     endloop
   endfacet
 
-  // --- PYRAMID SIDES (Unchanged) ---
   facet normal 0.707107 0 0.707107
     outer loop
       vertex 15 15 0
@@ -73,7 +71,6 @@ solid End_Cap_with_Holes_Fixed
     endloop
   endfacet
 
-  // --- INNER WALLS of the hole ---
   facet normal 0 1 0
     outer loop
       vertex -10 1.5 15

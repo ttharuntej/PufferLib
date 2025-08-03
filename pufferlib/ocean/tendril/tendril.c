@@ -67,6 +67,8 @@ void c_reset(Tendril* env) {
     for (int i = 0; i < NUM_JOINTS; i++) {
         env->joint_angles[i] = JOINT_LIMIT_RAD / 2.0f; // 90 degrees
         env->joint_velocities[i] = 0.0f;
+        env->last_actions[i] = 0.0f;
+        env->smoothed_velocities[i] = 0.0f;
     }
     
     // Generate servo-reachable target (same as training)
@@ -154,11 +156,18 @@ void c_step(Tendril* env) {
         float old_angle = env->joint_angles[i]; // Store previous angle
         float new_angle = old_angle + delta;
         
-        // CRITICAL: Enforce MG996R servo limits (0-180°) with safety margins
-        float min_limit = 5.0f * M_PI / 180.0f;   // 5° minimum (servo deadband)
-        float max_limit = 175.0f * M_PI / 180.0f; // 175° maximum (servo deadband)
-        
-        env->joint_angles[i] = clampf(new_angle, min_limit, max_limit);
+        // SERVO BACKLASH SIMULATION: Apply deadband around current position
+        float backlash = env->servo_backlash[i];
+        if (fabsf(new_angle - env->joint_angles[i]) > backlash) {
+            // Movement exceeds deadband, servo responds
+            
+            // CRITICAL: Enforce MG996R servo limits (0-180°) with safety margins
+            float min_limit = 5.0f * M_PI / 180.0f;   // 5° minimum (servo deadband)
+            float max_limit = 175.0f * M_PI / 180.0f; // 175° maximum (servo deadband)
+            
+            env->joint_angles[i] = clampf(new_angle, min_limit, max_limit);
+        }
+        // else: no movement (within backlash deadband)
         
         // Update velocity based on ACTUAL change after clamping
         env->joint_velocities[i] = (env->joint_angles[i] - old_angle) / TAU;
@@ -176,7 +185,8 @@ void c_step(Tendril* env) {
             env->target_state = TARGET_SUCCESS;
         }
     } else {
-        env->stability_timer = 0.0f;  // Reset if not accurate
+        // GENTLE: Decay timer instead of complete reset (more forgiving of small oscillations)
+        env->stability_timer = fmaxf(0.0f, env->stability_timer - TAU * 0.5f);
     }
 
     // REWARD CALCULATION: Use sophisticated reward function
@@ -190,6 +200,16 @@ void c_step(Tendril* env) {
     // TRAINING EPISODE TERMINATION: Simple success-based ending
     env->terminals[0] = (env->target_state == TARGET_SUCCESS);  // Episode ends when target reached
     env->truncations[0] = (env->tick >= MAX_STEPS);             // Truncate at max steps
+    
+    // UPDATE SMOOTHED VELOCITIES (exponential moving average)
+    float alpha = 0.1f; // Smoothing factor
+    for (int i = 0; i < NUM_JOINTS; i++) {
+        env->smoothed_velocities[i] = alpha * env->joint_velocities[i] + 
+                                      (1.0f - alpha) * env->smoothed_velocities[i];
+    }
+
+    // STORE ACTIONS FOR NEXT STEP'S CONSISTENCY CALCULATION
+    memcpy(env->last_actions, env->actions, sizeof(env->actions));
     
     // Update observations
     compute_observations(env);
