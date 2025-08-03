@@ -116,6 +116,10 @@ def make_multiagent(buf=None, **kwargs):
     env = pufferlib.MultiagentEpisodeStats(env)
     return pufferlib.emulation.PettingZooPufferEnv(env=env, buf=buf)
 
+def make_tendril(num_envs=1, render_mode='human', buf=None, **kwargs):
+    from .tendril.tendril import Tendril
+    return Tendril(num_envs=num_envs, render_mode=render_mode, buf=buf, **kwargs)
+
 MAKE_FUNCTIONS = {
     'battle': 'Battle',
     'breakout': 'Breakout',
@@ -156,6 +160,7 @@ MAKE_FUNCTIONS = {
     'checkers': 'Checkers',
     'asteroids': 'Asteroids',
     'whisker_racer': 'WhiskerRacer',
+    'tendril': 'Tendril',
     'spaces': make_spaces,
     'multiagent': make_multiagent,
 }

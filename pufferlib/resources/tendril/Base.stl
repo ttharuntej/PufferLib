@@ -1,0 +1,184 @@
+solid Base_for_MG996R_Fixed
+  facet normal 0 0 -1
+    outer loop
+      vertex -30 -30 0
+      vertex 30 -30 0
+      vertex 30 30 0
+    endloop
+  endfacet
+  facet normal 0 0 -1
+    outer loop
+      vertex -30 -30 0
+      vertex 30 30 0
+      vertex -30 30 0
+    endloop
+  endfacet
+  facet normal 0 1 0
+    outer loop
+      vertex -30 30 0
+      vertex 30 30 0
+      vertex 30 30 20
+    endloop
+  endfacet
+  facet normal 0 1 0
+    outer loop
+      vertex -30 30 0
+      vertex 30 30 20
+      vertex -30 30 20
+    endloop
+  endfacet
+  facet normal 0 -1 0
+    outer loop
+      vertex 30 -30 20
+      vertex 30 -30 0
+      vertex -30 -30 0
+    endloop
+  endfacet
+  facet normal 0 -1 0
+    outer loop
+      vertex -30 -30 20
+      vertex 30 -30 20
+      vertex -30 -30 0
+    endloop
+  endfacet
+  facet normal 1 0 0
+    outer loop
+      vertex 30 -30 0
+      vertex 30 -30 20
+      vertex 30 30 20
+    endloop
+  endfacet
+  facet normal 1 0 0
+    outer loop
+      vertex 30 -30 0
+      vertex 30 30 20
+      vertex 30 30 0
+    endloop
+  endfacet
+  facet normal -1 0 0
+    outer loop
+      vertex -30 30 20
+      vertex -30 -30 20
+      vertex -30 -30 0
+    endloop
+  endfacet
+  facet normal -1 0 0
+    outer loop
+      vertex -30 30 0
+      vertex -30 30 20
+      vertex -30 -30 0
+    endloop
+  endfacet
+  facet normal 0 0 1
+    outer loop
+      vertex -30 30 20
+      vertex -20.5 10 20
+      vertex -30 -30 20
+    endloop
+  endfacet
+  facet normal 0 0 1
+    outer loop
+      vertex -20.5 10 20
+      vertex -20.5 -10 20
+      vertex -30 -30 20
+    endloop
+  endfacet
+  facet normal 0 0 1
+    outer loop
+      vertex -20.5 -10 20
+      vertex 20.5 -10 20
+      vertex -30 -30 20
+    endloop
+  endfacet
+  facet normal 0 0 1
+    outer loop
+      vertex 20.5 -10 20
+      vertex 30 -30 20
+      vertex -30 -30 20
+    endloop
+  endfacet
+  facet normal 0 0 1
+    outer loop
+      vertex 30 -30 20
+      vertex 20.5 10 20
+      vertex 30 30 20
+    endloop
+  endfacet
+  facet normal 0 0 1
+    outer loop
+      vertex 20.5 10 20
+      vertex 20.5 -10 20
+      vertex 30 -30 20
+    endloop
+  endfacet
+  facet normal 0 0 1
+    outer loop
+      vertex 20.5 10 20
+      vertex -20.5 10 20
+      vertex 30 30 20
+    endloop
+  endfacet
+  facet normal 0 0 1
+    outer loop
+      vertex -20.5 10 20
+      vertex -30 30 20
+      vertex 30 30 20
+    endloop
+  endfacet
+  facet normal 0 1 0
+    outer loop
+      vertex -20.5 10 20
+      vertex -20.5 10 0
+      vertex 20.5 10 0
+    endloop
+  endfacet
+  facet normal 0 1 0
+    outer loop
+      vertex -20.5 10 20
+      vertex 20.5 10 0
+      vertex 20.5 10 20
+    endloop
+  endfacet
+  facet normal 1 0 0
+    outer loop
+      vertex 20.5 10 20
+      vertex 20.5 10 0
+      vertex 20.5 -10 0
+    endloop
+  endfacet
+  facet normal 1 0 0
+    outer loop
+      vertex 20.5 10 20
+      vertex 20.5 -10 0
+      vertex 20.5 -10 20
+    endloop
+  endfacet
+  facet normal 0 -1 0
+    outer loop
+      vertex 20.5 -10 20
+      vertex 20.5 -10 0
+      vertex -20.5 -10 0
+    endloop
+  endfacet
+  facet normal 0 -1 0
+    outer loop
+      vertex 20.5 -10 20
+      vertex -20.5 -10 0
+      vertex -20.5 -10 20
+    endloop
+  endfacet
+  facet normal -1 0 0
+    outer loop
+      vertex -20.5 -10 20
+      vertex -20.5 -10 0
+      vertex -20.5 10 0
+    endloop
+  endfacet
+  facet normal -1 0 0
+    outer loop
+      vertex -20.5 -10 20
+      vertex -20.5 10 0
+      vertex -20.5 10 20
+    endloop
+  endfacet
+endsolid Base_for_MG996R_Fixed

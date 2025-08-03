@@ -1,0 +1,45 @@
+# Robotic Arm Environment Configuration
+# Clean 3-DOF arm with realistic servo physics for sim-to-real transfer
+
+base:
+  env_name: puffer_robotic_arm
+  exp_name: robotic_arm_reaching
+  track: False
+  
+train:
+  total_timesteps: 2000000         # 2M steps for testing, scale up for production
+  learning_rate: 2.5e-4            # Conservative learning rate
+  batch_size: 32768                # Smaller batch for CPU training
+  minibatch_size: 4096             # CPU-friendly minibatch
+  update_epochs: 4                 # PPO update epochs
+  gamma: 0.99                      # Discount factor
+  gae_lambda: 0.95                 # GAE lambda
+  norm_adv: True                   # Normalize advantages
+  clip_coef: 0.2                   # PPO clip coefficient
+  clip_vloss: True                 # Clip value loss
+  ent_coef: 0.01                   # Entropy coefficient (encourage exploration)
+  vf_coef: 0.5                     # Value function coefficient
+  max_grad_norm: 0.5               # Gradient clipping
+  target_kl: 0.01                  # KL divergence target
+
+vec:
+  num_envs: 4                      # CPU-friendly parallel environments
+  num_workers: 1                   # Single worker for CPU
+  backend: "PufferEnv"             # Use PufferEnv backend
+  
+network:
+  hidden_size: 128                 # Neural network hidden size
+  num_layers: 2                    # Number of hidden layers
+  activation: "tanh"               # Activation function (good for continuous control)
+  
+policy:
+  recurrent: False                 # Use feedforward policy
+  lstm_layers: 1                   # LSTM layers (if recurrent=True)
+  
+eval:
+  eval_frequency: 50000            # Evaluate every 50k steps
+  eval_episodes: 10                # Number of evaluation episodes
+  
+logging:
+  log_frequency: 10000             # Log every 10k steps
+  save_frequency: 100000           # Save model every 100k steps
