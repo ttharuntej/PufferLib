@@ -11,14 +11,18 @@ from torch.distributions.utils import logits_to_probs
 import pufferlib
 import pufferlib.models
 
+# Fix PyTorch 2.2+ compatibility with heavyball optimizer
+if hasattr(torch, 'compiler') and not hasattr(torch.compiler, 'is_compiling'):
+    torch.compiler.is_compiling = lambda: False
+
 
 numpy_to_torch_dtype_dict = {
     np.dtype("float64"): torch.float64,
     np.dtype("float32"): torch.float32,
     np.dtype("float16"): torch.float16,
-    np.dtype("uint64"): torch.uint64,
-    np.dtype("uint32"): torch.uint32,
-    np.dtype("uint16"): torch.uint16,
+    np.dtype("uint64"): torch.int64,  # torch.uint64 removed in PyTorch 2.2+
+    np.dtype("uint32"): torch.int32,  # torch.uint32 removed in PyTorch 2.2+
+    np.dtype("uint16"): torch.int16,  # torch.uint16 removed in PyTorch 2.2+
     np.dtype("uint8"): torch.uint8,
     np.dtype("int64"): torch.int64,
     np.dtype("int32"): torch.int32,
