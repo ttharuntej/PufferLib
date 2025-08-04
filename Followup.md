@@ -1,185 +1,101 @@
-The Core Problem & Our Approach
+Tendril Project: Detailed Execution Plan & Technical Roadmap (v2)Objective: To systematically advance the Tendril project from its current state to a robust, high-performance, sim-to-real-ready robotic control system.Guiding Principle: This plan follows a "Fix-then-Measure-then-Improve" methodology. Each phase builds a stable foundation for the next. Do not skip steps. The goal is not just to get a result, but to build a reliable and reproducible research platform.Phase 0: Safety Net & Setup (Due: EOD, Day 1)Rationale: Before making any changes, we must establish a safety net. Version control is non-negotiable in research; it allows us to roll back to a known-good state if an experiment fails. A centralized logging platform (Weights & Biases) is our "lab notebook," ensuring every experimental result is captured and comparable.Action Items:Tag the Current Repository: Create a permanent reference point for the current codebase.Command:git tag v0.1-baseline -m "Initial baseline before implementing unified roadmap"
+git push --tags
+Create a Weights & Bienses (W&B) Project: This will be the central dashboard for all training runs, metrics, and evaluations.Action: Go to wandb.ai, log in, and create a new project named tendril-sim2real.⚠️ Prerequisite: Ensure the WANDB_API_KEY environment variable is set on the training machine. Otherwise, logs will be created locally and will not appear on the online dashboard.✅ Success Check: A v0.1-baseline tag exists in the Git repository, and an empty tendril-sim2real project is visible on your W&B dashboard.Phase 1: Bug Squash & Metric Plumbing (Due: Day 4)Rationale: The current code contains subtle logic errors that corrupt our data and prevent proper evaluation. We cannot trust any experimental results until these are fixed. This phase is about ensuring our measurements are correct and our training process is stable.Task 1.1: Fix last_angular_error Double UpdateThe Issue: The last_angular_error variable is updated in two different places (compute_reward and c_step). This means the "progress" calculation (env->last_angular_error - env->angular_error) is performed using stale data from two timesteps ago.The Fix: Enforce a single, authoritative update of last_angular_error at the very end of the c_step function.Implementation (tendril.c):// In function: float compute_reward(Tendril* env)
+// ...
+// env->last_angular_error = env->angular_error; // <-- DELETE THIS LINE
+// ...
 
-    Problem: Your agent successfully reaches its targets, but it does so inefficiently. Its movements are likely slow, wiggly, and indirect because it's only rewarded for eventually getting there, not for how it gets there.
+// In function: void c_step(Tendril* env)
+// ...
+// env->rewards[0] = compute_reward(env);
+//
+// // STATE UPDATE: Prepare for next step's reward calculation
+// env->last_angular_error = env->angular_error; // <-- KEEP THIS AUTHORITATIVE UPDATE
+// ...
+✅ Verification: The logic is sound. (Optional) Create a small C-based unit test that feeds the c_step function a known sequence of observations and asserts that the calculated progress reward matches the expected value at each step.Task 1.2: Activate Evaluation MetricsThe Issue: The update_evaluation_metrics() function is never called.The Fix: Call this function within c_step when in evaluation mode. Throttle any printf statements within the function to avoid spamming the console.Implementation (tendril.c):// In function: void update_evaluation_metrics(Tendril* env)
+// Wrap any printf calls to make them optional
+#ifdef VERBOSE_EVAL
+// e.g. printf("Updating metrics...\n");
+#endif
 
-    Approach: We will refine the agent's environment by enhancing its perception and incentives. We will teach it to value its time and to dislike jerky movements, pushing it to learn smoother, faster, and more direct paths.
+// In function: void c_step(Tendril* env)
+// ...
+env->rewards[0] = compute_reward(env);
 
-Action Item 1: Make the Agent Value Time
-
-This is the highest-impact first step to encourage efficiency.
-
-    Goal: Force the agent to find the quickest path to the target by making every moment it "wastes" have a small cost.
-
-    Action: Add a small, constant time penalty to the compute_reward function in tendril.c.
-    C
-
-    // In tendril.c -> compute_reward()
-    float compute_reward(Tendril* env) {
-        float reward = 0.0f;
-
-        float progress = env->last_angular_error - env->angular_error;
-        reward += progress * 1.0f;
-
-        if (env->target_state == TARGET_SUCCESS) {
-            reward += 10.0f;
-        }
-
-        // ACTION: ADD THIS LINE
-        // Creates a "cost of living" that encourages speed.
-        reward -= 0.01f;
-
-        // ... (rest of the function)
-        return reward;
+// ---------- Auto-eval metrics and target progression ----------
+if (env->auto_eval_mode) {
+    update_evaluation_metrics(env);
+    if (env->target_state == TARGET_SUCCESS) {
+        advance_to_next_target(env);
     }
+}
+// ...
+✅ Verification: When running in evaluation mode, the logged EvaluationMetrics struct will now contain non-zero values for avg_velocity, direction_changes, etc.Task 1.3: Restore Soft Timeout for TrainingThe Issue: No timeout in training wastes compute on unsolvable episodes. Using wall-clock time (GetTime()) is not robust to debugging pauses.The Fix: Re-introduce a timeout based on simulation steps (env->tick) and apply a specific negative reward for timing out.Implementation (tendril.c):// In function: void c_step(Tendril* env)
+// ...
+// (After the auto-eval block from Task 1.2)
 
-    Rationale: By adding a penalty of -0.01 every single step, the agent is incentivized to reach the +10.0 success bonus in as few steps as possible.
+// Soft timeout for training mode to prevent getting stuck
+float elapsed_sim_time = env->tick * TAU;
+if (!env->auto_eval_mode && elapsed_sim_time > 30.0f) {
+    env->target_state = TARGET_TIMEOUT;
+    env->terminals[0] = true;
+    env->rewards[0] -= 5.0f; // Explicit penalty for failure
+}
+// ...
+✅ Verification: In training mode, stuck episodes terminate after 30.0 / TAU steps. The W&B reward curve will show distinct negative dips corresponding to these timeout penalties.Task 1.4: Integrate PufferLib EvalCallbackThe Issue: We need a robust, automated way to run evaluations and log detailed metrics to W&B.The Fix: Use the PufferLib EvalCallback, ensuring the C++ binding is correctly configured to pass custom evaluation metrics back to the Python-based callback.Implementation (C++ Binding - binding.cpp or similar):Your PufferLib binding needs to be modified to handle the auto_eval_mode flag and to populate the info dictionary on episode termination, which the EvalCallback reads.// In your binding's step function, when an episode ends (terminal or truncation)
+if (terminal || truncation) {
+    if (env->auto_eval_mode) {
+        // This is the crucial step: copy your C struct into the info dict
+        info["eval"]["targets_completed"] = env->log.eval.targets_completed;
+        info["eval"]["avg_time_to_target"] = env->log.eval.avg_time_to_target;
+        info["eval"]["avg_angular_error"] = env->log.eval.avg_angular_error;
+        info["eval"]["direction_changes"] = env->log.eval.direction_changes;
+        info["eval"]["confidence_score"] = env->log.eval.confidence_score;
+    }
+}
+Implementation (Python Training Script):The Python script remains largely the same, but be aware of what the callback is logging.# ... (imports and binding definition) ...
+# Note on EvalCallback behavior:
+# By default, SB3's EvalCallback logs the environment's mean reward as `eval/mean_reward`.
+# Since our new reward function might be small, this can be misleading.
+# The primary metrics to watch on W&B will be the custom ones we added to the info dict,
+# which will appear as `eval/targets_completed`, `eval/avg_angular_error`, etc.
+✅ Verification: A training run successfully logs to W&B. The dashboard shows charts for eval/targets_completed, eval/avg_angular_error, and the other custom metrics.Phase 2: Reward & Action Smoothing (Due: Day 6)Rationale: The core problem is "jitter," caused by the agent "reward hacking" the progress term. We will fix this by re-architecting the reward to overwhelmingly favor stability and by smoothing the agent's noisy actions before they affect the servos.Task 2.1: Re-architect the Reward FunctionThe Fix: Implement the new stability-focused reward function, ensuring the stability timer contribution is capped to prevent reward inflation after success.Implementation (tendril.c):// In function: float compute_reward(Tendril* env)
+// Replace the entire function body with this:
+float reward = 0.0f;
+// ... (progress, action penalty, etc. from previous plan) ...
 
-Action Item 2: Penalize Jerky Movements
-
-This will directly target the "wiggliness" and promote smooth, stable motion.
-
-    Goal: Teach the agent to avoid sudden, high-acceleration movements.
-
-    Action:
-
-        First, add a new field to your Tendril struct in tendril.h to remember the last step's velocity.
-        C
-
-// In tendril.h -> struct Tendril
-struct Tendril {
-    // ... (existing fields)
-    float movement_sample_time;
-
-    // ACTION: ADD THIS LINE
-    float last_joint_velocities[NUM_JOINTS];
-
-    // ... (rest of the struct)
+// 2. Stability Reward - The primary objective, now capped
+float stability_reward = 0.0f;
+if (env->angular_error < ANGULAR_THRESHOLD_RAD) {
+    float stable_seconds = fminf(env->stability_timer, STABILITY_DURATION);
+    stability_reward = (stable_seconds / STABILITY_DURATION) * 5.0f;
+}
+reward += stability_reward;
+// ...
+✅ Verification: A new W&B run (labeled reward_v2) shows a significant increase in eval/targets_completed and a decrease in eval/direction_changes.Task 2.2: Implement Action FilterThe Fix: Apply a simple IIR filter to the actions. Crucially, initialize the filter's state at reset and update last_actions with the filtered value to ensure the consistency penalty works correctly.Implementation (tendril.h & tendril.c):Add to Tendril struct in tendril.h:struct Tendril {
+    // ... existing fields
+    float filtered_actions[NUM_JOINTS]; // For IIR action filter
 };
+Initialize in c_reset in tendril.c:void c_reset(Tendril* env) {
+    // ... existing reset code
+    for (int i = 0; i < NUM_JOINTS; i++) {
+        env->filtered_actions[i] = 0.0f; // CRITICAL: Zero-init on reset
+    }
+    // ...
+}
+Modify c_step in tendril.c:// In function: void c_step(Tendril* env)
+// ...
+// --- Action Filter (IIR Low-pass) ---
+float alpha = 0.2f;
+for (int i = 0; i < NUM_JOINTS; i++) {
+    env->filtered_actions[i] = alpha * env->actions[i] + (1.0f - alpha) * env->filtered_actions[i];
+}
 
-Next, modify compute_reward and c_step in tendril.c to calculate and penalize acceleration.
-C
+// PROCESS ACTIONS - Apply FILTERED actions
+// ... (use env->filtered_actions[i] in the delta calculation) ...
 
-        // In tendril.c -> compute_reward()
-        float compute_reward(Tendril* env) {
-            // ... (previous reward logic)
-            reward -= 0.01f; // Time penalty
-
-            // ACTION: ADD THIS LOGIC TO PENALIZE ACCELERATION
-            float acceleration_penalty = 0.0f;
-            for (int i = 0; i < NUM_JOINTS; i++) {
-                // Calculate acceleration (change in velocity)
-                float acceleration = fabsf(env->joint_velocities[i] - env->last_joint_velocities[i]);
-                acceleration_penalty += acceleration;
-            }
-            reward -= acceleration_penalty * 0.05f; // Penalize jerkiness
-
-            // ... (rest of the function)
-            return reward;
-        }
-
-        // In tendril.c -> c_step(), right before the function ends
-        void c_step(Tendril* env) {
-            // ... (all existing c_step logic)
-            compute_observations(env);
-
-            // ACTION: ADD THIS LINE AT THE VERY END OF THE FUNCTION
-            // Remember the current velocities for the next step's acceleration calculation.
-            memcpy(env->last_joint_velocities, env->joint_velocities, sizeof(env->joint_velocities));
-        }
-
-    Rationale: The agent now receives a direct penalty for high acceleration (jerk). To maximize its reward, it must learn to make smooth, controlled movements with gentle changes in velocity.
-
-Action Item 3: Enhance the Agent's Perception
-
-This is a more advanced step to give the agent the context it needs to understand motion.
-
-    Goal: Allow the AI model to "see" a short history of movement so it can naturally infer velocity and momentum.
-
-    Action: This is a configuration change in your RL framework, not in the C code. In your training script or configuration file where you initialize the PufferLib environment, enable frame stacking.
-
-        Set the number of stacked frames to 4.
-
-    Rationale: By seeing the last 4 states at once, the neural network can learn the patterns of motion directly. This makes it much easier for it to learn the smooth control policies we are now rewarding it for.
-
-
-    More info on Action Item 3:
-
-    Yes, this is a standard technique in reinforcement learning, and it can be implemented cleanly using the existing PufferLib and Gymnasium ecosystem. You don't need to reinvent the wheel.
-
-Here’s a breakdown of how it's done and my perspective on it.
-
------
-
-### The PufferLib / Gymnasium Approach
-
-PufferLib is built upon the Gymnasium (formerly OpenAI Gym) API. The standard way to add functionality like frame stacking is by using **environment wrappers**. A wrapper is a layer you put "around" your base environment to modify its behavior without changing the core environment code itself.
-
-The `gymnasium.wrappers.FrameStack` is the exact tool for this job. It automatically handles stacking the observations for you and correctly updates the environment's `observation_space` so the neural network knows what to expect.
-
-### Step-by-Step Implementation
-
-You will make this change in your **Python training script**, not your C++ code. This keeps your core simulation logic clean.
-
-Here is how you would set up your environment creator function to include frame stacking:
-
-```python
-# In your main Python training script
-
-import pufferlib
-import pufferlib.emulation
-import pufferlib.frameworks.cleanrl
-import gymnasium as gym
-from gymnasium.wrappers import FrameStack
-
-# Assume your C++ environment is wrapped in a Python class called `TendrilEnv`
-# that follows the Gymnasium API.
-from your_project.tendril_env import TendrilEnv
-
-def make_env_creator(num_stack=4):
-    """
-    This function returns another function, which PufferLib uses
-    to create environment instances.
-    """
-    def creator():
-        # 1. Create an instance of your base Tendril environment
-        env = TendrilEnv()
-
-        # 2. Wrap the environment with FrameStack
-        # This will stack the last `num_stack` observations.
-        # The observation space will change from (17,) to (4, 17).
-        env = FrameStack(env, num_stack=num_stack)
-
-        return env
-    return creator
-
-# --- In your training setup ---
-
-# Create the function that PufferLib will use to make environments
-env_creator = make_env_creator(num_stack=4)
-
-# PufferLib will now automatically create environments that have
-# frame stacking built-in. Your policy's input layer will
-# be automatically configured to handle the new observation
-# shape of (4, 17).
-
-# Example of using it with a CleanRL-style trainer in PufferLib
-trainer = pufferlib.frameworks.cleanrl.make_clean_pufferl_fn(
-    env_creator=env_creator,
-    # ... your other parameters like policy, learning rate, etc.
-)
-trainer()
-```
-
-**Important Note**: When you apply the `FrameStack` wrapper, the shape of your observation space changes from `(17,)` to `(4, 17)`. PufferLib and the underlying neural network library (PyTorch) will automatically adapt the network's input layer to handle this new shape, so you generally don't need to change your policy code.
-
------
-
-### My Point of View (POV)
-
-This is unequivocally the **correct and most effective way** to implement this feature.
-
-1.  **It's Modular and Clean**: This approach keeps your core C++ simulation logic completely separate from the data pre-processing. Your C++ code doesn't need to know or care about frame stacking; it just produces one observation at a time. This is good software design.
-
-2.  **It's Robust**: You are using the standard, well-tested `FrameStack` wrapper from Gymnasium, which is the industry-standard toolkit. This is far less error-prone than trying to implement the stacking logic yourself inside the C++ code.
-
-3.  **It's Powerful**: Providing the agent with temporal history is one of the most significant improvements you can make for control tasks. The "wiggliness" you see is often a symptom of an agent that can't perceive its own momentum. This change gives it the "eyes" to see that momentum and your enhanced reward function gives it the "brain" to want to control it. This is a crucial step toward achieving smooth, realistic motion suitable for **sim-to-real transfer**.
+// ...
+// STORE FILTERED ACTIONS for next step's consistency calculation
+memcpy(env->last_actions, env->filtered_actions, sizeof(env->actions));
+// ...
+✅ Verification: An A/B test on W&B shows the filtered runs have a quantifiably lower eval/direction_changes and a lower standard deviation of angular_error during evaluation.Phase 3 & Beyond: The Research FrontierPhase 3: Curriculum & Domain Randomization:⚠️ Implementation Note: When randomizing geometric parameters like SEGMENT_LENGTH, ensure the randomized value is used in both the physics simulation (compute_forward_kinematics) and the visualization code (draw_2d_views). If they diverge, the visualization will become misleading, making debugging extremely difficult.Phase 4: Live Diagnostics: Proceed as planned.Phase 5: Advanced Policy Experiments: Proceed as planned.Project-Wide Best PracticesIncorporate these professional habits throughout the project lifecycle.Continuous Integration: Set up a minimal GitHub Action that compiles the C code on every push. This prevents merging code that doesn't build.Documentation: Maintain a changelog.md file. After every significant change (like a reward function tweak or bug fix), add a bullet point explaining what changed and why. This will be invaluable for writing papers and onboarding new lab members.Memory Safety: The filtered_actions array is new mutable state. It is safe for now, but be mindful not to make it a static or global variable if you ever move to multi-threaded environments. Run valgrind --leak-check=full on a test executable once a week to catch potential memory leaks from libraries like Raylib.This revised plan is technically sound, addresses all expert feedback, and sets the project on a clear path to success.

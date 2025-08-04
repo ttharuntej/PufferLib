@@ -1,13 +1,7 @@
 #include "tendril.h"
 
-// randf is already defined in tendril.h
-
-// Clamp value between min and max
-static inline float clampf(float value, float min, float max) {
-    if (value < min) return min;
-    if (value > max) return max;
-    return value;
-}
+// Math functions now implemented in tendril_math.c
+// Utility functions (randf, clampf) now in tendril.h as inline
 
 // 2D rendering doesn't need complex camera controls - much simpler and more stable!
 
@@ -33,7 +27,7 @@ void close_client(Client* client) {
     free(client);
 }
 
-void c_close(Tendril* env) {
+void close_env(Tendril* env) {
     if (env->client) {
         close_client(env->client);
         env->client = NULL;
@@ -59,7 +53,10 @@ void add_log(Tendril* env) {
 }
 
 // Reset environment for new episode
-void c_reset(Tendril* env) {
+void reset_env(Tendril* env, uint32_t seed) {
+    // Seed per-environment RNG for deterministic behavior
+    seed_env_rng(env, seed);
+    
     env->episode_return = 0.0f;
     env->tick = 0;
     
@@ -88,7 +85,7 @@ void c_reset(Tendril* env) {
 }
 
 // Physics simulation step - FIXED VERSION
-// void c_step(Tendril* env) {
+// void step_env(Tendril* env) {
 //     env->tick++;
     
 //     // PROCESS ACTIONS - Apply joint angle changes (only if target is active)
@@ -102,7 +99,7 @@ void c_reset(Tendril* env) {
 //             env->joint_angles[i] = clampf(env->joint_angles[i], 0.0f, JOINT_LIMIT_RAD);
             
 //             // Update velocity (simple finite difference)
-//             env->joint_velocities[i] = delta / TAU;
+//             env->joint_velocities[i] = delta / DT;
 //         }
 //     }
     
@@ -146,7 +143,7 @@ void c_reset(Tendril* env) {
 // }
 
 // Physics simulation step - FIXED VERSION
-void c_step(Tendril* env) {
+void step_env(Tendril* env) {
     env->tick++;
     
     // PROCESS ACTIONS - Apply joint angle changes with STRICT SERVO LIMITS
@@ -170,7 +167,7 @@ void c_step(Tendril* env) {
         // else: no movement (within backlash deadband)
         
         // Update velocity based on ACTUAL change after clamping
-        env->joint_velocities[i] = (env->joint_angles[i] - old_angle) / TAU;
+        env->joint_velocities[i] = (env->joint_angles[i] - old_angle) / DT;
     }
     
     // Update forward kinematics
@@ -178,7 +175,7 @@ void c_step(Tendril* env) {
     
     // TARGET STATE LOGIC: Update stability timer and success state
     if (env->angular_error < ANGULAR_THRESHOLD_RAD) {
-        env->stability_timer += TAU;
+        env->stability_timer += DT;
         
         // SUCCESS: Accurate pointing for required duration
         if (env->stability_timer >= STABILITY_DURATION) {
@@ -186,7 +183,7 @@ void c_step(Tendril* env) {
         }
     } else {
         // GENTLE: Decay timer instead of complete reset (more forgiving of small oscillations)
-        env->stability_timer = fmaxf(0.0f, env->stability_timer - TAU * 0.5f);
+        env->stability_timer = fmaxf(0.0f, env->stability_timer - DT * 0.5f);
     }
 
     // REWARD CALCULATION: Use sophisticated reward function
@@ -216,7 +213,7 @@ void c_step(Tendril* env) {
 }
 
 // 2D visualization of tendril (STABLE VERSION)
-void c_render(Tendril* env) {
+void render_env(Tendril* env) {
     // Handle window controls
     if (IsKeyDown(KEY_ESCAPE)) {
         c_close(env);
@@ -339,7 +336,7 @@ void draw_top_view(Tendril* env, Rectangle view, float scale) {
     
     // Draw SERVO1 ROTATION (show actual hardware rotation)
     float servo1_angle = env->joint_angles[0];  // 0-180° servo range
-    float display_angle = servo1_angle - M_PI/2;  // Center display at 0°
+    float display_angle = servo1_angle - M_PI/2;  // CANONICAL MAPPING: servo - π/2
     
     // Draw servo rotation indicator (arc showing 180° range)
     DrawCircleLines(center.x, center.y, base_size/2 + 10, YELLOW);
@@ -352,9 +349,9 @@ void draw_top_view(Tendril* env, Rectangle view, float scale) {
     DrawLineEx(center, servo_direction, 3, PUFF_RED);
     
     // Show ACTUAL 3-JOINT ARM CONSTRUCTION (realistic hardware representation)
-    float servo1_yaw = env->joint_angles[0] - M_PI/2;  // Center at 0°
-    float servo2_pitch = env->joint_angles[1] - M_PI/2; // Convert to display angle
-    float servo3_pitch = env->joint_angles[2] - M_PI/2;
+    float servo1_yaw = env->joint_angles[0] - M_PI/2;  // CANONICAL MAPPING: servo - π/2
+    float servo2_pitch = env->joint_angles[1] - M_PI/2; // CANONICAL MAPPING: servo - π/2
+    float servo3_pitch = env->joint_angles[2] - M_PI/2; // CANONICAL MAPPING: servo - π/2
     
     // Calculate ACTUAL joint positions (3 segments like real hardware)
     Vector2 base_joint = center;  // Servo1 position (base)
@@ -476,9 +473,9 @@ void draw_side_view(Tendril* env, Rectangle view, float scale) {
     draw_reachable_workspace_side(env, base_pos, scale);
     
     // Show REALISTIC 3-JOINT ARM (side view - shows pitch movements)
-    float servo1_yaw = env->joint_angles[0] - M_PI/2;    // Base rotation (not visible in side view)
-    float servo2_pitch = env->joint_angles[1] - M_PI/2;  // Shoulder pitch (main visible movement)
-    float servo3_pitch = env->joint_angles[2] - M_PI/2;  // Elbow pitch (secondary movement)
+    float servo1_yaw = env->joint_angles[0] - M_PI/2;    // CANONICAL MAPPING: servo - π/2
+    float servo2_pitch = env->joint_angles[1] - M_PI/2;  // CANONICAL MAPPING: servo - π/2
+    float servo3_pitch = env->joint_angles[2] - M_PI/2;  // CANONICAL MAPPING: servo - π/2
     
     // SEGMENT 1: Base to Joint2 (controlled by servo2 pitch)
     Vector2 joint2_pos = {
@@ -760,24 +757,24 @@ void generate_target_sequence(Tendril* env) {
             if (difficulty < 0.33f) {
                 // EASY targets (close to center, high up)
                 float radius = 20.0f + difficulty * 30.0f;
-                float angle = randf(0, 2*M_PI);
+                float angle = randf_env(env, 0, 2*M_PI);
                 candidate[0] = radius * cosf(angle);
                 candidate[1] = radius * sinf(angle);
-                candidate[2] = BASE_DEPTH + 40.0f + randf(0, 20.0f);
+                candidate[2] = BASE_DEPTH + 40.0f + randf_env(env, 0, 20.0f);
             } else if (difficulty < 0.66f) {
                 // MEDIUM targets (moderate distance)
                 float radius = 30.0f + (difficulty - 0.33f) * 50.0f;
-                float angle = randf(0, 2*M_PI);
+                float angle = randf_env(env, 0, 2*M_PI);
                 candidate[0] = radius * cosf(angle);
                 candidate[1] = radius * sinf(angle);
-                candidate[2] = BASE_DEPTH + 25.0f + randf(0, 40.0f);
+                candidate[2] = BASE_DEPTH + 25.0f + randf_env(env, 0, 40.0f);
             } else {
                 // HARD targets (edge of workspace)
                 float radius = 60.0f + (difficulty - 0.66f) * 40.0f;
-                float angle = randf(0, 2*M_PI);
+                float angle = randf_env(env, 0, 2*M_PI);
                 candidate[0] = radius * cosf(angle);
                 candidate[1] = radius * sinf(angle);
-                candidate[2] = BASE_DEPTH + 15.0f + randf(0, 50.0f);
+                candidate[2] = BASE_DEPTH + 15.0f + randf_env(env, 0, 50.0f);
             }
             
             // Validate reachability
@@ -820,7 +817,7 @@ void update_evaluation_metrics(Tendril* env) {
             eval->total_path_length += movement_distance;
             
             // Velocity calculation (mm/s)
-            float dt = 10 * TAU;  // Time since last sample
+            float dt = 10 * DT;  // Time since last sample
             float velocity = movement_distance / dt;
             eval->avg_velocity = (eval->avg_velocity * env->tick/10 + velocity) / (env->tick/10 + 1);
             
@@ -984,11 +981,16 @@ void print_evaluation_report(Tendril* env) {
 // Main demo function (for standalone testing)
 #ifdef TENDRIL_STANDALONE
 int main() {
-    srand(time(NULL));
-    
     Tendril env = {0};
-    allocate(&env);
-    c_reset(&env);
+    if (allocate(&env) != 0) {
+        fprintf(stderr, "Failed to allocate Tendril environment\n");
+        return -1;
+    }
+    
+    // Use time-based seed for demo (deterministic per run)
+    uint32_t demo_seed = (uint32_t)time(NULL);
+    printf("Demo using seed: %u\n", demo_seed);
+    reset_env(&env, demo_seed);
     
     printf("PufferLib Tendril Demo\\n");
     printf("Hardware specs: %d joints, %.0fmm segments\\n", NUM_JOINTS, SEGMENT_LENGTH);
@@ -996,7 +998,7 @@ int main() {
     printf("Creating 3D visualization window...\\n");
     
     // Initialize the window first
-    c_render(&env); // This creates the window
+    render_env(&env); // This creates the window
     
     printf("3D Window created! Controls:\\n");
     printf("- Mouse drag: Rotate camera\\n");
@@ -1007,11 +1009,11 @@ int main() {
     while (!WindowShouldClose() && frameCount < 1800) { // Auto-exit after 30 seconds
         // Random actions for demo (gentle movements)
         for (int i = 0; i < NUM_JOINTS; i++) {
-            env.actions[i] = randf(-0.3f, 0.3f); // Gentle random motions
+            env.actions[i] = randf_env(&env, -0.3f, 0.3f); // Gentle random motions
         }
         
-        c_step(&env);
-        c_render(&env);
+        step_env(&env);
+        render_env(&env);
         
         frameCount++;
         
@@ -1022,8 +1024,14 @@ int main() {
     }
     
     printf("Demo completed!\\n");
-    c_close(&env);
+    close_env(&env);
     free_allocated(&env);
     return 0;
 }
 #endif // TENDRIL_STANDALONE
+
+// Legacy API aliases for backward compatibility
+void c_reset(Tendril* env, uint32_t seed) { reset_env(env, seed); }
+void c_step(Tendril* env) { step_env(env); }
+void c_render(Tendril* env) { render_env(env); }
+void c_close(Tendril* env) { close_env(env); }
