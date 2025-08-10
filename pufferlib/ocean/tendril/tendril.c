@@ -83,6 +83,10 @@ void c_reset(Tendril* env) {
     
     // Initialize last angular error for reward shaping
     env->last_angular_error = env->angular_error;
+    
+    // NEW: episode accounting
+    env->log.episodes += 1;
+    env->episode_success_recorded = false;
 }
 
 // Physics simulation step - FIXED VERSION
@@ -193,6 +197,20 @@ void c_step(Tendril* env) {
     
     // Update observations
     compute_observations(env);
+    
+    // NEW: record per-step telemetry + count hits once
+    {
+        float d_perp = laser_miss_distance(env);
+        int i = env->log.hist_idx % METRIC_BUF;
+        env->log.ang_err_hist[i] = env->angular_error;  // radians
+        env->log.dperp_hist[i]   = d_perp;              // mm
+        env->log.hist_idx++;
+        if (env->log.hist_count < METRIC_BUF) env->log.hist_count++;
+    }
+    if (env->target_state == TARGET_SUCCESS && !env->episode_success_recorded) {
+        env->log.hits += 1;
+        env->episode_success_recorded = true;
+    }
 }
 
 // 2D visualization of tendril (STABLE VERSION)
@@ -431,6 +449,9 @@ void draw_top_view(Tendril* env, Rectangle view, float scale) {
         end_pos.y + env->pointing_direction[1] * 50 * scale
     };
     DrawLineEx(end_pos, laser_end, 2, PUFF_RED);
+    
+    // DEBUG: Draw line from end effector to target (shows desired direction)
+    DrawLineEx(end_pos, target_2d, 1, GRAY);
 }
 
 void draw_side_view(Tendril* env, Rectangle view, float scale) {
@@ -460,23 +481,23 @@ void draw_side_view(Tendril* env, Rectangle view, float scale) {
     float servo2_pitch = env->joint_angles[1] - M_PI/2;  // Shoulder pitch (main visible movement)
     float servo3_pitch = env->joint_angles[2] - M_PI/2;  // Elbow pitch (secondary movement)
     
-    // SEGMENT 1: Base to Joint2 (controlled by servo2 pitch)
+    // SEGMENT 1: Base to Joint2 (controlled by servo2 pitch) - FIXED: Apply base rotation projection
     Vector2 joint2_pos = {
-        base_pos.x + SEGMENT_LENGTH * cosf(servo2_pitch) * scale,
+        base_pos.x + SEGMENT_LENGTH * cosf(servo1_yaw) * cosf(servo2_pitch) * scale,
         base_pos.y - base_height - SEGMENT_LENGTH * sinf(servo2_pitch) * scale
     };
     
-    // SEGMENT 2: Joint2 to Joint3 (controlled by servo2 + servo3 combined pitch)
+    // SEGMENT 2: Joint2 to Joint3 (controlled by servo2 + servo3 combined pitch) - FIXED: Apply base rotation projection
     float combined_pitch = servo2_pitch + servo3_pitch;
     Vector2 joint3_pos = {
-        joint2_pos.x + SEGMENT_LENGTH * cosf(combined_pitch) * scale,
+        joint2_pos.x + SEGMENT_LENGTH * cosf(servo1_yaw) * cosf(combined_pitch) * scale,
         joint2_pos.y - SEGMENT_LENGTH * sinf(combined_pitch) * scale
     };
     
-    // END CAP: Joint3 to tip (final pointing direction)
+    // END CAP: Joint3 to tip (final pointing direction) - FIXED: Apply base rotation projection
     Vector2 tip_pos = {
-        joint3_pos.x + ENDCAP_LENGTH * cosf(combined_pitch + servo3_pitch * 0.3f) * scale,
-        joint3_pos.y - ENDCAP_LENGTH * sinf(combined_pitch + servo3_pitch * 0.3f) * scale
+        joint3_pos.x + ENDCAP_LENGTH * cosf(servo1_yaw) * cosf(combined_pitch) * scale,
+        joint3_pos.y - ENDCAP_LENGTH * sinf(combined_pitch) * scale
     };
     
     // Draw 3-SEGMENT ARM with color coding for each joint
@@ -604,10 +625,41 @@ void draw_status_overlay(Tendril* env) {
         DrawText(reachability_info, 10, y_offset + 45, 11, PUFF_RED);
     }
     
-    char info3[256];
-    sprintf(info3, "Angular Error: %.2f° | Stability: %.1fs", 
-            env->angular_error * 180/M_PI, env->stability_timer);
-    DrawText(info3, 10, y_offset + 60, 12, PUFF_WHITE);
+    // ANGULAR ERROR with color-coded feedback (ENHANCED DEBUG)
+    float error_degrees = env->angular_error * 180.0f / M_PI;
+    char angular_debug[128];
+    sprintf(angular_debug, "🎯 Angular Error: %.1f° (Target: <5°) | Stability: %.1fs", 
+            error_degrees, env->stability_timer);
+    
+    Color error_color;
+    if (error_degrees < 5.0f) error_color = PUFF_GREEN;      // Success threshold
+    else if (error_degrees < 15.0f) error_color = YELLOW;     // Getting close
+    else error_color = PUFF_RED;                              // Need improvement
+    
+    DrawText(angular_debug, 10, y_offset + 60, 12, error_color);
+    
+    // REAL-TIME PHYSICS DEBUG (Enhanced for troubleshooting)
+    char debug_physics[256];
+    sprintf(debug_physics, "🔍 Pointing Dir: (%.2f,%.2f,%.2f) | Target Dir: (%.2f,%.2f,%.2f)", 
+            env->pointing_direction[0], env->pointing_direction[1], env->pointing_direction[2],
+            env->target_direction[0], env->target_direction[1], env->target_direction[2]);
+    DrawText(debug_physics, 10, HEIGHT - 60, 10, PUFF_CYAN);
+    
+    // JOINT VALIDATION (Critical for servo debugging)
+    bool joints_valid = true;
+    for (int i = 0; i < NUM_JOINTS; i++) {
+        float angle_deg = env->joint_angles[i] * 180.0f / M_PI;
+        if (angle_deg < -5.0f || angle_deg > 185.0f) {
+            joints_valid = false;
+            char warning[64];
+            sprintf(warning, "⚠️ SERVO%d OUT OF RANGE: %.1f°", i+1, angle_deg);
+            DrawText(warning, 400, 50 + i*15, 10, PUFF_RED);
+        }
+    }
+    
+    if (joints_valid) {
+        DrawText("✅ All servos within valid range (0-180°)", 400, 50, 10, PUFF_GREEN);
+    }
     
     // Enhanced Controls
     DrawText("ESC: Exit | TAB: Fullscreen | Right Click: New Reachable Target | Left Click: Place Target", 10, HEIGHT - 35, 11, GRAY);

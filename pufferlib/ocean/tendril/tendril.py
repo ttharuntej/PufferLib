@@ -63,20 +63,62 @@ class Tendril(pufferlib.PufferEnv):
             binding.vec_reset(self.c_envs, 0)
         return self.observations, []
     
+    def _canonicalize_info(self, info: dict) -> dict:
+        """Normalize metric names and ensure plain Python floats."""
+        if not isinstance(info, dict):
+            return {}
+
+        # Map synonyms -> canonical keys expected in dashboards
+        if 'angular_error_deg_mean' not in info and 'angular_error_mean_deg' in info:
+            info['angular_error_deg_mean'] = info['angular_error_mean_deg']
+        if 'd_perp_mm_mean' not in info and 'miss_distance_mean_mm' in info:
+            info['d_perp_mm_mean'] = info['miss_distance_mean_mm']
+
+        # Ensure JSON-serializable scalars
+        clean = {}
+        for k, v in info.items():
+            if isinstance(v, (int, float)):
+                clean[k] = float(v)
+            elif hasattr(v, 'item'):  # numpy scalar
+                try:
+                    clean[k] = float(v.item())
+                except Exception:
+                    pass
+        return clean
+
     def step(self, actions):
         """Execute one environment step"""
-        # Ensure actions are in correct format and range
         actions = np.asarray(actions, dtype=np.float32)
         actions = np.clip(actions, -1.0, 1.0)
-        
+
         self.actions[:] = actions
         binding.vec_step(self.c_envs)
-        
-        # Generate info dict with performance metrics
-        info = []  # Disable vec_log for now to prevent hanging
-        
-        return (self.observations, self.rewards, 
-                self.terminals, self.truncations, info)
+
+        # 1) Pull metrics from C
+        info = binding.vec_log(self.c_envs)
+
+        # 2) Canonicalize names and make plain floats
+        info = self._canonicalize_info(info)
+
+        # 3) IMPORTANT: make it a list-of-dicts for vectorized logging
+        if not isinstance(info, (list, tuple)):
+            infos = [info for _ in range(self.num_agents)]
+        else:
+            # If your binding ever returns per-env info, still ensure right length
+            infos = list(info)
+            if len(infos) != self.num_agents:
+                infos = (infos * self.num_agents)[:self.num_agents]
+
+        # Optional debug (kept)
+        self._step_count = getattr(self, '_step_count', 0) + 1
+        if self._step_count % 1000 == 0:
+            print(f"[tendril.py] Step {self._step_count}, info[0] keys: {list(infos[0].keys())}")
+            if 'hit_rate' in infos[0]:
+                print(f"[tendril.py] hit_rate={infos[0].get('hit_rate')}, angular_error_deg_mean={infos[0].get('angular_error_deg_mean')}")
+            print(f"[tendril.py] Full info[0]: {infos[0]}")
+            import sys; sys.stdout.flush()
+
+        return (self.observations, self.rewards, self.terminals, self.truncations, infos)
     
     def render(self):
         """Render environment visualization"""

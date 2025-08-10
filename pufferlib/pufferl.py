@@ -1111,8 +1111,13 @@ def load_policy(args, vecenv, env_name=''):
 
     if load_path is not None:
         state_dict = torch.load(load_path, map_location=device)
-        state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
-        policy.load_state_dict(state_dict)
+        # Handle different state dict formats
+        cleaned_state_dict = {}
+        for k, v in state_dict.items():
+            # Remove common prefixes that might be present
+            cleaned_key = k.replace('module.', '').replace('policy.', '')
+            cleaned_state_dict[cleaned_key] = v
+        policy.load_state_dict(cleaned_state_dict)
         #state_path = os.path.join(*load_path.split('/')[:-1], 'state.pt')
         #optim_state = torch.load(state_path)['optimizer_state_dict']
         #pufferl.optimizer.load_state_dict(optim_state)

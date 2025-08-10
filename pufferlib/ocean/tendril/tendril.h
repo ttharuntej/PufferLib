@@ -36,7 +36,7 @@
 #define TARGET_SUCCESS 1      // Green - pointing accurately and stable
 // NO TIMEOUT STATE - Let agent try indefinitely like real hardware
 #define ANGULAR_THRESHOLD_RAD (5.0f * M_PI / 180.0f)  // 5 degrees pointing accuracy
-#define STABILITY_DURATION 2.0f     // Hold steady for 2 seconds after accurate pointing
+#define STABILITY_DURATION 1.0f     // Hold steady for 1 second after accurate pointing (easier curriculum)
 #define DISTANCE_THRESHOLD 10.0f    // Legacy distance threshold (10mm)
 #define VELOCITY_THRESHOLD 0.1f     // Legacy velocity threshold (0.1 rad/s)
 
@@ -99,6 +99,8 @@ struct EvaluationMetrics {
     float confidence_score;      // Overall performance confidence (0-1)
 };
 
+// keep the buffer small + cheap
+#define METRIC_BUF 512
 typedef struct Log Log;
 struct Log {
     float success_rate;       // Target reaching success rate
@@ -107,7 +109,22 @@ struct Log {
     float episode_length;     // Steps per episode
     float n;                  // Number of episodes
     float score;              // Cumulative score
+    
+    // NEW aggregates (episode-averaged, then averaged across episodes)
+    float mean_angular_error; // radians
+    float mean_d_perp;        // mm
+    float hit_rate;           // [0,1], fraction of episodes with success
     EvaluationMetrics eval;   // NEW: Programmatic evaluation metrics
+
+    // NEW: rolling telemetry buffers
+    float ang_err_hist[METRIC_BUF];  // radians
+    float dperp_hist[METRIC_BUF];    // millimeters
+    int   hist_idx;
+    int   hist_count;
+
+    // NEW: episode accounting
+    int episodes;
+    int hits;
 };
 
 typedef struct Client Client;  
@@ -145,6 +162,14 @@ struct Tendril {
     float episode_return;        // Cumulative reward
     float last_angular_error;    // Previous angular error for progress tracking
     
+    // Episode-level telemetry (for success pop reward fix)
+    float ep_ang_sum;            // sum of angular_error over this episode
+    float ep_dperp_sum;          // sum of d_perp over this episode
+    int ep_steps;                // step count this episode
+    int ep_hit;                  // 1 if TARGET_SUCCESS happened, else 0
+    float last_d_perp;           // instantaneous for logging
+    bool success_bonus_given;    // prevent double-adding the success bonus
+    
     // Target state management for visualization
     int target_state;            // 0=ACTIVE, 1=SUCCESS, 2=TIMEOUT, 3=TRANSITION
     float target_start_time;     // When current target was placed
@@ -162,6 +187,13 @@ struct Tendril {
     float servo_backlash[NUM_JOINTS];   // Servo deadband (radians)
     float friction_coeffs[NUM_JOINTS];  // Joint friction
     float joint_limits[NUM_JOINTS][2];  // Min/max joint angles
+    
+    // FIXED: Per-joint smoothness tracking (from expert feedback)
+    float prev_joint_vel[NUM_JOINTS];   // Previous joint velocities for acceleration calculation
+    float last_actions[NUM_JOINTS];     // Previous actions for control smoothness
+
+    // NEW: to count a success once per episode
+    bool episode_success_recorded;
 };
 
 // HARDWARE-ACCURATE Forward kinematics: Matches physical STL construction
@@ -390,27 +422,89 @@ void compute_observations(Tendril* env) {
 // }
 float compute_reward(Tendril* env) {
     float reward = 0.0f;
-
-    // 1. Dense Progress Reward (Potential-Based Shaping) - REDUCED SCALING
-    // This rewards the agent for reducing its angular error to the target.
-    // FIXED: Reduced from 10.0f to 1.0f to prevent over-exploration
-    float progress = env->last_angular_error - env->angular_error;
-    reward += progress * 1.0f; // Much more conservative scaling
-
-    // 2. Sparse Success Bonus
-    // A single, large bonus for achieving the final goal.
-    if (env->target_state == TARGET_SUCCESS) {
-        reward += 10.0f; // Reduced from 50.0f - less overwhelming
+    
+    // 1. DENSE ANGULAR ACCURACY REWARD (Primary - dot product shaping, numerically stable)
+    float cosang = env->pointing_direction[0]*env->target_direction[0]
+                 + env->pointing_direction[1]*env->target_direction[1]
+                 + env->pointing_direction[2]*env->target_direction[2];
+    cosang = fmaxf(-1.0f, fminf(1.0f, cosang));  // Clamp for safety
+    
+    // Strictly positive shaping emphasizing precision (0 to +8)
+    float ang_reward = 8.0f * powf(fmaxf(0.0f, cosang), 3.0f);  // Cubic precision focus
+    reward += ang_reward;
+    
+    // 2. LASER BEAM PERPENDICULAR DISTANCE REWARD (Brilliant insight from expert!)
+    // For a laser pointer, miss distance from beam matters more than tip-to-target distance
+    float rx = env->target_pos[0] - env->end_effector_pos[0];
+    float ry = env->target_pos[1] - env->end_effector_pos[1];
+    float rz = env->target_pos[2] - env->end_effector_pos[2];
+    
+    // d_perp = || r × pointing_dir || (perpendicular distance from laser beam to target)
+    float cx = ry*env->pointing_direction[2] - rz*env->pointing_direction[1];
+    float cy = rz*env->pointing_direction[0] - rx*env->pointing_direction[2]; 
+    float cz = rx*env->pointing_direction[1] - ry*env->pointing_direction[0];
+    float d_perp = sqrtf(cx*cx + cy*cy + cz*cz);
+    env->last_d_perp = d_perp;  // Store for telemetry
+    
+    // Compact shaping bonus for laser accuracy (0 to +2)
+    reward += 2.0f * expf(-d_perp / 25.0f);
+    
+    // 3. SPEED BONUS (Fast angular improvement)
+    float angular_improvement = env->last_angular_error - env->angular_error;
+    if (angular_improvement > 0.001f) {
+        reward += angular_improvement * 10.0f;  // Reward fast convergence
     }
-
-    // 3. Small penalty for excessive movement (optional)
-    float total_velocity = 0.0f;
+    
+    // 4. GRADUATED PRECISION BONUSES (Clear milestones)
+    float error_degrees = env->angular_error * 180.0f / M_PI;
+    if (error_degrees < 20.0f) reward += 3.0f;   // Getting close
+    if (error_degrees < 10.0f) reward += 5.0f;   // Very good  
+    if (error_degrees < 5.0f)  reward += 10.0f;  // Success threshold
+    if (error_degrees < 2.0f)  reward += 15.0f;  // Excellent precision
+    
+    // 5. STABILITY BONUS (Hold position when accurate)
+    if (env->angular_error < ANGULAR_THRESHOLD_RAD) {
+        reward += env->stability_timer * 15.0f;  // Reward steady pointing
+        if (env->stability_timer >= STABILITY_DURATION) {
+            reward += 25.0f;  // Mission complete bonus!
+        }
+    }
+    
+    // 6. SMOOTH MOTION PENALTIES (FIXED: Per-joint acceleration tracking)
+    float total_velocity = 0.0f, total_accel = 0.0f;
     for (int i = 0; i < NUM_JOINTS; i++) {
-        total_velocity += fabsf(env->joint_velocities[i]);
+        float v = env->joint_velocities[i];
+        total_velocity += fabsf(v);
+        total_accel += fabsf(v - env->prev_joint_vel[i]);  // FIXED: Per-joint comparison
+        env->prev_joint_vel[i] = v;  // Update for next step
     }
-    reward -= total_velocity * 0.001f; // Reduced penalty - allow movement
-
-    // NOTE: State updates moved to c_step() for cleaner separation of concerns
+    reward -= total_velocity * 0.015f;  // SOFTER: was 0.03f (halved)
+    reward -= total_accel * 0.025f;     // SOFTER: was 0.05f (halved)
+    
+    // 7. ACTION-BASED SMOOTHNESS (Expert recommendation - control costs)
+    float u_cost = 0.0f, du_cost = 0.0f;
+    for (int i = 0; i < NUM_JOINTS; i++) {
+        u_cost += fabsf(env->actions[i]);
+        du_cost += fabsf(env->actions[i] - env->last_actions[i]);  // Action smoothness
+        env->last_actions[i] = env->actions[i];  // Update for next step
+    }
+    reward -= 0.01f * u_cost;   // Small control effort penalty
+    reward -= 0.02f * du_cost;  // Action smoothness penalty
+    
+    // 8. TIME EFFICIENCY PENALTY
+    reward -= 0.002f;  // SOFTER: was 0.01f (gentler time penalty)
+    
+    // 9. JOINT LIMIT PENALTIES (Safety - use consistent 5-175° range)
+    for (int i = 0; i < NUM_JOINTS; i++) {
+        float angle_deg = env->joint_angles[i] * 180.0f / M_PI;
+        if (angle_deg < 10.0f || angle_deg > 170.0f) {  // Approaching limits
+            reward -= 2.0f;  // Warning penalty
+        }
+        if (angle_deg < 5.0f || angle_deg > 175.0f) {   // At limits  
+            reward -= 10.0f;  // Strong penalty
+        }
+    }
+    
     return reward;
 }
 
@@ -425,6 +519,10 @@ void init(Tendril* env) {
         env->joint_limits[i][1] = JOINT_LIMIT_RAD;
         env->servo_backlash[i] = 0.02f; // ~1 degree backlash
         env->friction_coeffs[i] = 0.1f;
+        
+        // FIXED: Initialize smoothness tracking (expert feedback)
+        env->prev_joint_vel[i] = 0.0f;  // Previous velocities start at zero
+        env->last_actions[i] = 0.0f;    // Previous actions start at zero
     }
 }
 
@@ -450,6 +548,21 @@ void free_allocated(Tendril* env) {
 // Utility functions
 static inline float randf(float min, float max) {
     return min + ((float)rand() / (float)RAND_MAX) * (max - min);
+}
+
+// NEW: perpendicular miss distance from beam line to target
+static inline float laser_miss_distance(const Tendril* env) {
+    float rx = env->target_pos[0] - env->end_effector_pos[0];
+    float ry = env->target_pos[1] - env->end_effector_pos[1];
+    float rz = env->target_pos[2] - env->end_effector_pos[2];
+    float px = env->pointing_direction[0];
+    float py = env->pointing_direction[1];
+    float pz = env->pointing_direction[2];
+    // |r × p|
+    float cx = ry*pz - rz*py;
+    float cy = rz*px - rx*pz;
+    float cz = rx*py - ry*px;
+    return sqrtf(cx*cx + cy*cy + cz*cz);
 }
 
 // SERVO REACHABILITY VALIDATION - First Principles Implementation
@@ -531,10 +644,14 @@ ReachabilityResult validate_target_reachability(float target_x, float target_y, 
     // Convert to servo2 angle: 0° = down, 90° = horizontal, 180° = up
     float servo2_angle = shoulder_angle_rad + M_PI/2;  // Add 90° to make 90° = horizontal
     
-    // 5. VALIDATE ALL SERVO LIMITS (0-180°) - TABLE-MOUNTED CONSTRAINTS
-    if (servo2_angle < 0.0f || servo2_angle > JOINT_LIMIT_RAD ||
-        servo3_angle < 0.0f || servo3_angle > JOINT_LIMIT_RAD) {
-        return result;  // Joint limits exceeded
+    // 5. VALIDATE ALL SERVO LIMITS (5-175° safety margins) - FIXED: Match runtime constraints
+    float min_safe = 5.0f * M_PI / 180.0f;    // 5° minimum safety margin
+    float max_safe = 175.0f * M_PI / 180.0f;  // 175° maximum safety margin
+    
+    if (servo1_angle < min_safe || servo1_angle > max_safe ||
+        servo2_angle < min_safe || servo2_angle > max_safe ||
+        servo3_angle < min_safe || servo3_angle > max_safe) {
+        return result;  // Joint limits exceeded (with safety margins)
     }
     
     // 6. ADDITIONAL 2D WORKSPACE CONSTRAINTS
@@ -543,11 +660,11 @@ ReachabilityResult validate_target_reachability(float target_x, float target_y, 
         return result;  // Too close to table surface
     }
     
-    // 7. CALCULATE SOLUTION QUALITY METRICS
+    // 7. CALCULATE SOLUTION QUALITY METRICS (FIXED: Use consistent safety margins)
     float limit_margins[3] = {
-        fminf(servo1_angle, JOINT_LIMIT_RAD - servo1_angle),
-        fminf(servo2_angle - M_PI/4, JOINT_LIMIT_RAD - servo2_angle),  // Account for table constraint
-        fminf(servo3_angle, JOINT_LIMIT_RAD - servo3_angle)
+        fminf(servo1_angle - min_safe, max_safe - servo1_angle),
+        fminf(fmaxf(servo2_angle - M_PI/4, servo2_angle - min_safe), max_safe - servo2_angle),  // Table + safety constraints
+        fminf(servo3_angle - min_safe, max_safe - servo3_angle)
     };
     
     result.min_distance_to_limits = fminf(limit_margins[0], fminf(limit_margins[1], limit_margins[2]));

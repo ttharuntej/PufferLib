@@ -13,11 +13,6 @@ static float clampf(float value, float min, float max) {
     return value;
 }
 
-static int cmp_float(const void* a, const void* b) {
-    float x = *(const float*)a, y = *(const float*)b;
-    return (x > y) - (x < y);
-}
-
 // randf function now defined in tendril.h
 
 // Auto-generate new target after success/timeout
@@ -46,17 +41,6 @@ static Vector2 Vector2Subtract(Vector2 v1, Vector2 v2) {
 void c_reset(Tendril* env) {
     env->episode_return = 0.0f;
     env->tick = 0;
-    
-    // NEW: episode accounting
-    env->log.episodes += 1;
-    env->episode_success_recorded = false;
-    
-    // Reset episode telemetry (success pop reward fix)
-    env->ep_ang_sum = 0.0f;
-    env->ep_dperp_sum = 0.0f;
-    env->ep_steps = 0;
-    env->ep_hit = 0;
-    env->success_bonus_given = false;
     
     // Reset joint angles to center positions
     for (int i = 0; i < NUM_JOINTS; i++) {
@@ -92,8 +76,8 @@ void c_step(Tendril* env) {
     if (env->target_state == TARGET_ACTIVE) {
         for (int i = 0; i < NUM_JOINTS; i++) {
             // Actions are in range [-1, 1], convert to angle deltas
-            // CONSERVATIVE: Prevent action saturation and entropy collapse  
-            float max_delta_per_step = 7.0f * M_PI / 180.0f; // 7°/step - prevents limit-hitting
+            // OPTIMIZED: Reduced for smoother, more precise control
+            float max_delta_per_step = (SERVO_SPEED_DEG_SEC * TAU * 0.4f) * (M_PI / 180.0f); // ~2.4°/step for precision
             float requested_delta = env->actions[i] * max_delta_per_step; // FIXED: Removed confusing sign flip
             
             // Apply servo speed limit (realistic MG996R physics)
@@ -118,11 +102,8 @@ void c_step(Tendril* env) {
         env->stability_timer += TAU;
         
         // SUCCESS: Agent pointed accurately and held steady
-        if (env->stability_timer >= STABILITY_DURATION && !env->success_bonus_given) {
-            env->rewards[0] += 50.0f;        // SUCCESS POP REWARD!
-            env->success_bonus_given = true; // don't double-count
+        if (env->stability_timer >= STABILITY_DURATION) {
             env->target_state = TARGET_SUCCESS;
-            env->ep_hit = 1;                 // mark episode as "hit"
         }
     } else {
         env->stability_timer = 0.0f;  // Reset if not accurate
@@ -130,36 +111,11 @@ void c_step(Tendril* env) {
     
     // NO TIMEOUT: Let agent try indefinitely (as user requested)
     
-    // Compute reward based on distance to target (scaled down by 5x for easier critic training)
-    env->rewards[0] = compute_reward(env) / 5.0f;
+    // Compute reward based on distance to target
+    env->rewards[0] = compute_reward(env);
     
     // FIXED: Update angular error tracking exactly once per step (expert feedback)
     env->last_angular_error = env->angular_error;
-    
-    // NEW: record per-step telemetry + count hits once
-    {
-        float rx = env->target_pos[0] - env->end_effector_pos[0];
-        float ry = env->target_pos[1] - env->end_effector_pos[1];
-        float rz = env->target_pos[2] - env->end_effector_pos[2];
-        float px = env->pointing_direction[0];
-        float py = env->pointing_direction[1];
-        float pz = env->pointing_direction[2];
-        // |r × p| - perpendicular distance from laser beam to target
-        float cx = ry*pz - rz*py;
-        float cy = rz*px - rx*pz;
-        float cz = rx*py - ry*px;
-        float d_perp = sqrtf(cx*cx + cy*cy + cz*cz);
-        
-        int i = env->log.hist_idx % METRIC_BUF;
-        env->log.ang_err_hist[i] = env->angular_error;  // radians
-        env->log.dperp_hist[i]   = d_perp;              // mm
-        env->log.hist_idx++;
-        if (env->log.hist_count < METRIC_BUF) env->log.hist_count++;
-    }
-    if (env->target_state == TARGET_SUCCESS && !env->episode_success_recorded) {
-        env->log.hits += 1;
-        env->episode_success_recorded = true;
-    }
     
     // TRAINING EPISODE TERMINATION: Simple success-based ending
     env->terminals[0] = (env->target_state == TARGET_SUCCESS);  // Episode ends when target reached
@@ -167,11 +123,6 @@ void c_step(Tendril* env) {
     
     // Update observations
     compute_observations(env);
-    
-    // Episode telemetry accumulation (success pop reward fix)
-    env->ep_ang_sum += env->angular_error;
-    env->ep_dperp_sum += env->last_d_perp;  // was set in compute_reward
-    env->ep_steps += 1;
 }
 
 void c_render(Tendril* env) {
@@ -220,28 +171,8 @@ void c_close(Tendril* env) {
 }
 
 void add_log(Tendril* env) {
-    // Calculate distance to target
-    float dx = env->end_effector_pos[0] - env->target_pos[0];
-    float dy = env->end_effector_pos[1] - env->target_pos[1]; 
-    float dz = env->end_effector_pos[2] - env->target_pos[2];
-    float distance = sqrtf(dx*dx + dy*dy + dz*dz);
-
-    bool success = (env->target_state == TARGET_SUCCESS) || (env->ep_hit == 1);
-
-    env->log.success_rate += success ? 1.0f : 0.0f;
-    env->log.avg_distance += distance;
-    env->log.episode_length += env->tick;
+    env->log.n += 1.0f;
     env->log.score += env->episode_return;
-
-    // NEW: per-episode means (success pop reward fix)
-    float ep_ang_mean = (env->ep_steps > 0) ? env->ep_ang_sum / env->ep_steps : env->angular_error;
-    float ep_dperp_mean = (env->ep_steps > 0) ? env->ep_dperp_sum / env->ep_steps : env->last_d_perp;
-
-    env->log.mean_angular_error += ep_ang_mean;
-    env->log.mean_d_perp += ep_dperp_mean;
-    env->log.hit_rate += success ? 1.0f : 0.0f;
-
-    env->log.n += 1.0f; // count episodes
 }
 
 Client* make_client(Tendril* env) {
@@ -910,72 +841,16 @@ static PyObject* vec_log(PyObject* self, PyObject* args) {
     
     VectorizedTendril* vec = (VectorizedTendril*)PyLong_AsVoidPtr(vec_ptr);
     
-    // Return aggregated log data with telemetry
+    // Return aggregated log data
     PyObject* log_dict = PyDict_New();
     
     if (vec->num_envs > 0) {
         Tendril* env = vec->envs[0];  // Use first environment's log
-        
-        // ---- NEW: compute rolling stats from first env ----
-        int n = env->log.hist_count;
-        double meanA = 0.0, meanD = 0.0;
-        for (int i = 0; i < n; i++) { meanA += env->log.ang_err_hist[i]; meanD += env->log.dperp_hist[i]; }
-        if (n > 0) { meanA /= n; meanD /= n; }
-
-        float p50A = NAN, p90A = NAN, p50D = NAN, p90D = NAN;
-        if (n > 0) {
-            float* A = (float*)malloc(n*sizeof(float));
-            float* D = (float*)malloc(n*sizeof(float));
-            memcpy(A, env->log.ang_err_hist, n*sizeof(float));
-            memcpy(D, env->log.dperp_hist, n*sizeof(float));
-            qsort(A, n, sizeof(float), cmp_float);
-            qsort(D, n, sizeof(float), cmp_float);
-            p50A = A[(int)(0.5f*(n-1))];
-            p90A = A[(int)(0.9f*(n-1))];
-            p50D = D[(int)(0.5f*(n-1))];
-            p90D = D[(int)(0.9f*(n-1))];
-            free(A); free(D);
-        }
-
-        double to_deg = 180.0 / M_PI;
-        PyDict_SetItemString(log_dict, "angular_error_mean_deg", PyFloat_FromDouble(meanA * to_deg));
-        PyDict_SetItemString(log_dict, "angular_error_p50_deg",  PyFloat_FromDouble(p50A * to_deg));
-        PyDict_SetItemString(log_dict, "angular_error_p90_deg",  PyFloat_FromDouble(p90A * to_deg));
-        PyDict_SetItemString(log_dict, "miss_distance_mean_mm",  PyFloat_FromDouble(meanD));
-        PyDict_SetItemString(log_dict, "miss_distance_p50_mm",   PyFloat_FromDouble(p50D));
-        PyDict_SetItemString(log_dict, "miss_distance_p90_mm",   PyFloat_FromDouble(p90D));
-
-        int episodes = env->log.episodes;
-        int hits     = env->log.hits;
-        double hit_rate = (episodes > 0) ? ((double)hits / (double)episodes) : 0.0;
-        PyDict_SetItemString(log_dict, "episodes", PyFloat_FromDouble((double)episodes));
-        PyDict_SetItemString(log_dict, "hits",     PyFloat_FromDouble((double)hits));
-        PyDict_SetItemString(log_dict, "hit_rate", PyFloat_FromDouble(hit_rate));
-        
-        // Traditional metrics
         PyDict_SetItemString(log_dict, "success_rate", PyFloat_FromDouble(env->log.success_rate / fmaxf(env->log.n, 1.0f)));
         PyDict_SetItemString(log_dict, "avg_distance", PyFloat_FromDouble(env->log.avg_distance / fmaxf(env->log.n, 1.0f)));
         PyDict_SetItemString(log_dict, "episode_length", PyFloat_FromDouble(env->log.episode_length / fmaxf(env->log.n, 1.0f)));
-        PyDict_SetItemString(log_dict, "score", PyFloat_FromDouble(env->log.score / fmaxf(env->log.n, 1.0f)));
-        PyDict_SetItemString(log_dict, "n", PyFloat_FromDouble(env->log.n));
-        
-        // NEW: success pop reward fix metrics
-        double denom = fmaxf(env->log.n, 1.0f);
-        double hit_rate_val = env->log.hit_rate / denom;
-        double ang_deg_val = (env->log.mean_angular_error / denom) * 180.0 / M_PI;
-        double dperp_val = env->log.mean_d_perp / denom;
-        
-        PyDict_SetItemString(log_dict, "angular_error_rad_mean", PyFloat_FromDouble(env->log.mean_angular_error / denom));
-        PyDict_SetItemString(log_dict, "angular_error_deg_mean", PyFloat_FromDouble(ang_deg_val));
-        PyDict_SetItemString(log_dict, "d_perp_mm_mean", PyFloat_FromDouble(dperp_val));
-        PyDict_SetItemString(log_dict, "hit_rate", PyFloat_FromDouble(hit_rate_val));
-        
-        // 60-second verification: debug print to confirm metrics flow
-        if ((int)(env->log.n) % 50 == 0 && env->log.n > 0) {
-            printf("[vec_log] hit=%.3f ang=%.2f° dperp=%.1fmm (n=%.0f)\n",
-                   hit_rate_val, ang_deg_val, dperp_val, env->log.n);
-            fflush(stdout);
-        }
+        PyDict_SetItemString(log_dict, "score", PyFloat_FromDouble(env->log.score));
+        PyDict_SetItemString(log_dict, "episodes", PyFloat_FromDouble(env->log.n));
     }
     
     return log_dict;
