@@ -901,6 +901,39 @@ static PyObject* vec_close(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
+static PyObject* vec_init(PyObject* self, PyObject* args, PyObject* kwargs) {
+    PyObject* obs_arr, *act_arr, *rew_arr, *term_arr, *trunc_arr;
+    int num_envs, seed;
+    
+    if (!PyArg_ParseTuple(args, "OOOOOii", &obs_arr, &act_arr, &rew_arr, 
+                          &term_arr, &trunc_arr, &num_envs, &seed)) {
+        return NULL;
+    }
+    
+    VectorizedTendril* vec = (VectorizedTendril*)calloc(1, sizeof(VectorizedTendril));
+    vec->envs = (Tendril**)calloc(num_envs, sizeof(Tendril*));
+    vec->num_envs = num_envs;
+    
+    for (int i = 0; i < num_envs; i++) {
+        Tendril* env = (Tendril*)calloc(1, sizeof(Tendril));
+        
+        // Connect Python arrays to C pointers (stride by env index)
+        env->observations = &((float*)PyArray_DATA((PyArrayObject*)obs_arr))[i * 17]; // 17D obs
+        env->actions = &((float*)PyArray_DATA((PyArrayObject*)act_arr))[i * 3];       // 3D actions  
+        env->rewards = &((float*)PyArray_DATA((PyArrayObject*)rew_arr))[i];
+        env->terminals = &((bool*)PyArray_DATA((PyArrayObject*)term_arr))[i];
+        env->truncations = &((bool*)PyArray_DATA((PyArrayObject*)trunc_arr))[i];
+        
+        init(env);
+        c_reset(env);
+        
+        vec->envs[i] = env;
+    }
+    
+    srand(seed);
+    return PyLong_FromVoidPtr(vec);
+}
+
 static PyObject* vec_log(PyObject* self, PyObject* args) {
     PyObject* vec_ptr;
     
@@ -984,6 +1017,7 @@ static PyObject* vec_log(PyObject* self, PyObject* args) {
 static PyMethodDef module_methods[] = {
     {"env_init", env_init, METH_VARARGS, "Initialize environment"},
     {"vectorize", vectorize, METH_VARARGS, "Create vectorized environments"},
+    {"vec_init", (PyCFunction)vec_init, METH_VARARGS | METH_KEYWORDS, "Initialize vectorized environments"},
     {"vec_reset", vec_reset, METH_VARARGS, "Reset vectorized environments"},
     {"vec_step", vec_step, METH_VARARGS, "Step vectorized environments"},
     {"vec_render", vec_render, METH_VARARGS, "Render vectorized environments"},

@@ -119,8 +119,14 @@ struct Log {
     // NEW: rolling telemetry buffers
     float ang_err_hist[METRIC_BUF];  // radians
     float dperp_hist[METRIC_BUF];    // millimeters
+    float dperp_line_hist[METRIC_BUF];    // line distance (different from ray distance)
+    float cosang_hist[METRIC_BUF];   // cosine of angular error
     int   hist_idx;
     int   hist_count;
+
+    // NEW: normalization sanity checks
+    float pointing_dir_norm;  // Should be ~1.0
+    float target_dir_norm;    // Should be ~1.0
 
     // NEW: episode accounting
     int episodes;
@@ -195,6 +201,12 @@ struct Tendril {
     // NEW: to count a success once per episode
     bool episode_success_recorded;
 };
+
+// Function declarations for PufferLib binding
+void c_reset(Tendril* env);
+void c_step(Tendril* env);
+void c_render(Tendril* env);
+void c_close(Tendril* env);
 
 // HARDWARE-ACCURATE Forward kinematics: Matches physical STL construction
 void compute_forward_kinematics(Tendril* env) {

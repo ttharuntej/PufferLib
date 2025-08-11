@@ -39,21 +39,17 @@ class Tendril(pufferlib.PufferEnv):
         self.report_interval = report_interval
         
         super().__init__(buf)
-        
-        # Initialize C environments (simplified like working minimal version)
-        c_envs = []
-        for i in range(num_envs):
-            c_envs.append(binding.env_init(
-                self.observations[i],
-                self.actions[i], 
-                self.rewards,      # Pass full rewards array, not slice
-                self.terminals,    # Pass full terminals array, not slice  
-                self.truncations,  # Pass full truncations array, not slice
-                i,
-                seed + i
-            ))
-        
-        self.c_envs = binding.vectorize(*c_envs)
+        self.actions = np.zeros((num_envs, 3), dtype=np.float32)
+
+        self.c_envs = binding.vec_init(
+            self.observations,
+            self.actions,
+            self.rewards,
+            self.terminals,
+            self.truncations,
+            num_envs,
+            seed,
+        )
     
     def reset(self, seed=None):
         """Reset environment(s) to initial state"""
