@@ -1003,6 +1003,9 @@ static PyObject* vec_log(PyObject* self, PyObject* args) {
         PyDict_SetItemString(log_dict, "d_perp_mm_mean", PyFloat_FromDouble(dperp_val));
         PyDict_SetItemString(log_dict, "hit_rate", PyFloat_FromDouble(hit_rate_val));
         
+        // BINDING VERSION FOR SANITY CHECK  
+        PyDict_SetItemString(log_dict, "tendril_binding_version", PyFloat_FromDouble(20250810.0));
+        
         // 60-second verification: debug print to confirm metrics flow
         if ((int)(env->log.n) % 50 == 0 && env->log.n > 0) {
             printf("[vec_log] hit=%.3f ang=%.2f° dperp=%.1fmm (n=%.0f)\n",

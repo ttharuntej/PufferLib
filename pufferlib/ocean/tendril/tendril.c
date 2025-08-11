@@ -72,6 +72,14 @@ void c_reset(Tendril* env) {
     // Generate servo-reachable target (same as training)
     generate_reachable_target(env);
     
+    // CURRICULUM HELPER: Set base yaw toward target for easy episodes
+    if (env->log.episodes < 50) {
+        float yaw = atan2f(env->target_pos[1], env->target_pos[0]); // [-pi,pi]
+        float servo1 = yaw + M_PI/2; // map to [0,pi] nominal
+        float min_limit = 5.0f * M_PI/180.0f, max_limit = 175.0f * M_PI/180.0f;
+        env->joint_angles[0] = clampf(servo1, min_limit, max_limit);
+    }
+    
     // Initialize target state
     env->target_state = TARGET_ACTIVE;
     env->target_start_time = (float)GetTime();

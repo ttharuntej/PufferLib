@@ -107,6 +107,10 @@ class Tendril(pufferlib.PufferEnv):
 
         # Optional debug (kept)
         self._step_count = getattr(self, '_step_count', 0) + 1
+        
+        # SANITY CHECK: Verify correct binding is loaded (temporary debug)
+        if self._step_count % 500 == 0:
+            print("[binding?]", "tendril_binding_version" in infos[0], infos[0].get("tendril_binding_version"))
         if self._step_count % 1000 == 0:
             print(f"[tendril.py] Step {self._step_count}, info[0] keys: {list(infos[0].keys())}")
             if 'hit_rate' in infos[0]:

@@ -433,20 +433,14 @@ void compute_observations(Tendril* env) {
 //     return total_reward;
 // }
 float compute_reward(Tendril* env) {
-    float reward = 0.0f;
     
-    // 1. DENSE ANGULAR ACCURACY REWARD (Primary - dot product shaping, numerically stable)
+    // SIMPLIFIED REWARD: Make gradients show up immediately
     float cosang = env->pointing_direction[0]*env->target_direction[0]
                  + env->pointing_direction[1]*env->target_direction[1]
                  + env->pointing_direction[2]*env->target_direction[2];
     cosang = fmaxf(-1.0f, fminf(1.0f, cosang));  // Clamp for safety
     
-    // Strictly positive shaping emphasizing precision (0 to +8)
-    float ang_reward = 8.0f * powf(fmaxf(0.0f, cosang), 3.0f);  // Cubic precision focus
-    reward += ang_reward;
-    
-    // 2. LASER BEAM PERPENDICULAR DISTANCE REWARD (Brilliant insight from expert!)
-    // For a laser pointer, miss distance from beam matters more than tip-to-target distance
+    // 2. LASER BEAM PERPENDICULAR DISTANCE 
     float rx = env->target_pos[0] - env->end_effector_pos[0];
     float ry = env->target_pos[1] - env->end_effector_pos[1];
     float rz = env->target_pos[2] - env->end_effector_pos[2];
@@ -458,66 +452,24 @@ float compute_reward(Tendril* env) {
     float d_perp = sqrtf(cx*cx + cy*cy + cz*cz);
     env->last_d_perp = d_perp;  // Store for telemetry
     
-    // Compact shaping bonus for laser accuracy (0 to +2)
-    reward += 2.0f * expf(-d_perp / 25.0f);
+    // Angular error for improvement tracking
+    float d_err = env->last_angular_error - env->angular_error;
     
-    // 3. SPEED BONUS (Fast angular improvement)
-    float angular_improvement = env->last_angular_error - env->angular_error;
-    if (angular_improvement > 0.001f) {
-        reward += angular_improvement * 10.0f;  // Reward fast convergence
-    }
+    // RAY-GATED MISS DISTANCE: Discourage backward pointing
+    float r_mag = sqrtf(rx*rx + ry*ry + rz*rz);
+    float d_perp_line = d_perp;                       // what we already computed
+    float d_perp_ray  = (cosang >= 0.f) ? d_perp_line : r_mag;
     
-    // 4. GRADUATED PRECISION BONUSES (Clear milestones)
-    float error_degrees = env->angular_error * 180.0f / M_PI;
-    if (error_degrees < 20.0f) reward += 3.0f;   // Getting close
-    if (error_degrees < 10.0f) reward += 5.0f;   // Very good  
-    if (error_degrees < 5.0f)  reward += 10.0f;  // Success threshold
-    if (error_degrees < 2.0f)  reward += 15.0f;  // Excellent precision
+    // RESEARCHER'S EXACT SIMPLIFIED REWARD COMPONENTS:
+    float forward_bonus = 1.5f * cosang;                 // can go negative if pointing backward
+    float perp_penalty  = 0.010f * d_perp_ray;           // use ray-gated distance
+    float improvement   = 0.20f * fmaxf(0.f, d_err);
+    float shaped        = forward_bonus - perp_penalty + improvement;
+    env->rewards[0]     = shaped;
     
-    // 5. STABILITY BONUS (Hold position when accurate)
-    if (env->angular_error < ANGULAR_THRESHOLD_RAD) {
-        reward += env->stability_timer * 15.0f;  // Reward steady pointing
-        if (env->stability_timer >= STABILITY_DURATION) {
-            reward += 25.0f;  // Mission complete bonus!
-        }
-    }
+    // SUCCESS BONUS REMOVED - handled in c_step with success_bonus_given guard
     
-    // 6. SMOOTH MOTION PENALTIES (FIXED: Per-joint acceleration tracking)
-    float total_velocity = 0.0f, total_accel = 0.0f;
-    for (int i = 0; i < NUM_JOINTS; i++) {
-        float v = env->joint_velocities[i];
-        total_velocity += fabsf(v);
-        total_accel += fabsf(v - env->prev_joint_vel[i]);  // FIXED: Per-joint comparison
-        env->prev_joint_vel[i] = v;  // Update for next step
-    }
-    reward -= total_velocity * 0.015f;  // SOFTER: was 0.03f (halved)
-    reward -= total_accel * 0.025f;     // SOFTER: was 0.05f (halved)
-    
-    // 7. ACTION-BASED SMOOTHNESS (Expert recommendation - control costs)
-    float u_cost = 0.0f, du_cost = 0.0f;
-    for (int i = 0; i < NUM_JOINTS; i++) {
-        u_cost += fabsf(env->actions[i]);
-        du_cost += fabsf(env->actions[i] - env->last_actions[i]);  // Action smoothness
-        env->last_actions[i] = env->actions[i];  // Update for next step
-    }
-    reward -= 0.01f * u_cost;   // Small control effort penalty
-    reward -= 0.02f * du_cost;  // Action smoothness penalty
-    
-    // 8. TIME EFFICIENCY PENALTY
-    reward -= 0.002f;  // SOFTER: was 0.01f (gentler time penalty)
-    
-    // 9. JOINT LIMIT PENALTIES (Safety - use consistent 5-175° range)
-    for (int i = 0; i < NUM_JOINTS; i++) {
-        float angle_deg = env->joint_angles[i] * 180.0f / M_PI;
-        if (angle_deg < 10.0f || angle_deg > 170.0f) {  // Approaching limits
-            reward -= 2.0f;  // Warning penalty
-        }
-        if (angle_deg < 5.0f || angle_deg > 175.0f) {   // At limits  
-            reward -= 10.0f;  // Strong penalty
-        }
-    }
-    
-    return reward;
+    return env->rewards[0];
 }
 
 // Initialize tendril environment
@@ -697,11 +649,21 @@ void generate_reachable_target(Tendril* env) {
     const int MAX_ATTEMPTS = 50;  // Prevent infinite loops
     int attempts = 0;
     
+    // CURRICULUM: Make early targets easy to find forward signal
+    int easy = env->log.episodes < 50; // first ~50 episodes across vec; tune if needed
+    
     while (attempts < MAX_ATTEMPTS) {
-        // Generate candidate target within forward hemisphere only
-        float candidate_x = randf(0.0f, WORKSPACE_SIZE/2);  // Only positive X (forward)
-        float candidate_y = randf(-WORKSPACE_SIZE/2, WORKSPACE_SIZE/2);
-        float candidate_z = randf(BASE_DEPTH + 10, BASE_DEPTH + WORKSPACE_SIZE/2);
+        float candidate_x, candidate_y, candidate_z;
+        if (easy) {
+            // tight forward cone, mid height
+            candidate_x = randf(30.0f, 70.0f);
+            candidate_y = randf(-10.0f, 10.0f);
+            candidate_z = randf(BASE_DEPTH + 35.0f, BASE_DEPTH + 55.0f);
+        } else {
+            candidate_x = randf(0.0f, WORKSPACE_SIZE/2);
+            candidate_y = randf(-WORKSPACE_SIZE/2, WORKSPACE_SIZE/2);
+            candidate_z = randf(BASE_DEPTH + 10, BASE_DEPTH + WORKSPACE_SIZE/2);
+        }
         
         // Validate reachability
         ReachabilityResult result = validate_target_reachability(candidate_x, candidate_y, candidate_z);
