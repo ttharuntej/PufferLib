@@ -72,12 +72,30 @@ void c_reset(Tendril* env) {
     // Generate servo-reachable target (same as training)
     generate_reachable_target(env);
     
-    // CURRICULUM HELPER: Set base yaw toward target for easy episodes
-    if (env->log.episodes < 50) {
-        float yaw = atan2f(env->target_pos[1], env->target_pos[0]); // [-pi,pi]
-        float servo1 = yaw + M_PI/2; // map to [0,pi] nominal
+    // FIX #1: IK WARM-START - Place agent near solution for early episodes
+    #define EASY_EPISODES 800
+    if (env->log.episodes < EASY_EPISODES) {
+        ReachabilityResult sol = validate_target_reachability(
+            env->target_pos[0], env->target_pos[1], env->target_pos[2]);
+
         float min_limit = 5.0f * M_PI/180.0f, max_limit = 175.0f * M_PI/180.0f;
-        env->joint_angles[0] = clampf(servo1, min_limit, max_limit);
+
+        if (sol.is_reachable) {
+            // Place near-solution with small noise so agent must stabilize
+            float n1 = (randf(-6, 6)) * M_PI/180.0f;
+            float n2 = (randf(-6, 6)) * M_PI/180.0f;
+            float n3 = (randf(-6, 6)) * M_PI/180.0f;
+
+            env->joint_angles[0] = clampf(sol.joint_angles[0] + n1, min_limit, max_limit);
+            env->joint_angles[1] = clampf(sol.joint_angles[1] + n2, min_limit, max_limit);
+            env->joint_angles[2] = clampf(sol.joint_angles[2] + n3, min_limit, max_limit);
+        } else {
+            // Fallback: geometric warm start
+            float yaw = atan2f(env->target_pos[1], env->target_pos[0]);
+            env->joint_angles[0] = clampf(yaw + M_PI/2, min_limit, max_limit);
+            env->joint_angles[1] = clampf(120.0f * M_PI/180.0f, min_limit, max_limit);
+            env->joint_angles[2] = clampf( 90.0f * M_PI/180.0f, min_limit, max_limit);
+        }
     }
     
     // Initialize target state
@@ -162,7 +180,7 @@ void c_step(Tendril* env) {
     // PROCESS ACTIONS - Apply joint angle changes with STRICT SERVO LIMITS
     for (int i = 0; i < NUM_JOINTS; i++) {
         // Actions are in range [-1, 1], convert to angle deltas
-        float delta = env->actions[i] * (10.0f * M_PI / 180.0f); // Reduced to 10° per step for better control
+        float delta = env->actions[i] * (7.5f * M_PI / 180.0f); // Reduced to 7.5° per step for finer precision
         float old_angle = env->joint_angles[i]; // Store previous angle
         float new_angle = old_angle + delta;
         
@@ -179,16 +197,27 @@ void c_step(Tendril* env) {
     // Update forward kinematics
     compute_forward_kinematics(env);
     
-    // TARGET STATE LOGIC: Update stability timer and success state
-    if (env->angular_error < ANGULAR_THRESHOLD_RAD) {
+    // ---- Warm-start success criteria (bootstraps early hits) ----
+    #define EASY_EPISODES 800
+    #define EASY_ANG_DEG  8.0f    // looser early angle
+    #define EASY_HOLD_S   0.6f    // shorter early hold
+
+    float thr  = (env->log.episodes < EASY_EPISODES) ? (EASY_ANG_DEG * M_PI / 180.0f) : ANGULAR_THRESHOLD_RAD;
+    float hold = (env->log.episodes < EASY_EPISODES) ? EASY_HOLD_S : STABILITY_DURATION;
+    
+    // SANITY CHECK: Confirm success gate is active
+    if ((env->tick % 250) == 0 && env->log.episodes < EASY_EPISODES+5) {
+        printf("[succ-gate] thr=%.1f deg hold=%.2fs ep=%d tick=%d\n",
+               thr*180.0f/M_PI, hold, env->log.episodes, env->tick);
+    }
+
+    if (env->angular_error < thr) {
         env->stability_timer += TAU;
-        
-        // SUCCESS: Accurate pointing for required duration
-        if (env->stability_timer >= STABILITY_DURATION) {
+        if (env->stability_timer >= hold) {
             env->target_state = TARGET_SUCCESS;
         }
     } else {
-        env->stability_timer = 0.0f;  // Reset if not accurate
+        env->stability_timer = 0.0f;
     }
 
     // REWARD CALCULATION: Use sophisticated reward function
@@ -199,9 +228,25 @@ void c_step(Tendril* env) {
     
     // NO TIMEOUT: Let agent try indefinitely (as user requested)
     
-    // TRAINING EPISODE TERMINATION: Simple success-based ending
-    env->terminals[0] = (env->target_state == TARGET_SUCCESS);  // Episode ends when target reached
-    env->truncations[0] = (env->tick >= MAX_STEPS);             // Truncate at max steps
+    // FIX #2: SHORTER EPISODES for curriculum (more resets = more signal)
+    #define EASY_MAX_STEPS 200  // 4s at 50Hz
+    bool easy = (env->log.episodes < EASY_EPISODES);
+    
+    // TRAINING EPISODE TERMINATION: Success or timeout with dynamic length
+    if (env->target_state == TARGET_SUCCESS) {
+        env->terminals[0]   = true;
+        env->truncations[0] = false;
+    } else {
+        // Dynamic episode length: shorter during easy phase for more resets
+        int max_steps = (env->log.episodes < 800) ? 400 : 800;   // easy → harder
+        if (env->tick >= max_steps) {
+            env->terminals[0]   = false;
+            env->truncations[0] = true;
+        } else {
+            env->terminals[0]   = false;
+            env->truncations[0] = false;
+        }
+    }
     
     // Update observations
     compute_observations(env);
@@ -218,6 +263,14 @@ void c_step(Tendril* env) {
     if (env->target_state == TARGET_SUCCESS && !env->episode_success_recorded) {
         env->log.hits += 1;
         env->episode_success_recorded = true;
+    }
+    
+    // CRITICAL FIX: Auto-reset after signaling done
+    // PPO sees episode boundary this step; next step starts fresh environment
+    if (env->terminals[0] || env->truncations[0]) {
+        printf("[AUTO-RESET] Episode %d ending, calling c_reset()\n", env->log.episodes);
+        c_reset(env);
+        printf("[AUTO-RESET] After reset, episodes now: %d\n", env->log.episodes);
     }
 }
 

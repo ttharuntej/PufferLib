@@ -29,6 +29,7 @@
 // Physics parameters
 #define TAU 0.02f             // 50Hz timestep (20ms)
 #define MAX_STEPS 1000        // Episode length
+#define EASY_EPISODES 800     // Number of curriculum episodes with easier success criteria
 #define WORKSPACE_SIZE 120.0f // mm workspace (2 * 50mm segments + margin)
 
 // Target pointing parameters (UPDATED for laser pointing)
@@ -64,11 +65,11 @@
 #define VIEW_FRONT_SIZE 300
 
 // PufferLib color scheme
-const Color PUFF_RED = (Color){187, 0, 0, 255};
-const Color PUFF_CYAN = (Color){0, 187, 187, 255};
-const Color PUFF_WHITE = (Color){241, 241, 241, 241};
-const Color PUFF_BACKGROUND = (Color){6, 24, 24, 255};
-const Color PUFF_GREEN = (Color){0, 187, 0, 255};
+static const Color PUFF_RED = (Color){187, 0, 0, 255};
+static const Color PUFF_CYAN = (Color){0, 187, 187, 255};
+static const Color PUFF_WHITE = (Color){241, 241, 241, 241};
+static const Color PUFF_BACKGROUND = (Color){6, 24, 24, 255};
+static const Color PUFF_GREEN = (Color){0, 187, 0, 255};
 
 // PROGRAMMATIC EVALUATION METRICS (Drone-inspired)
 typedef struct EvaluationMetrics EvaluationMetrics;
@@ -172,6 +173,7 @@ struct Tendril {
     float ep_ang_sum;            // sum of angular_error over this episode
     float ep_dperp_sum;          // sum of d_perp over this episode
     int ep_steps;                // step count this episode
+    int last_episode_steps;      // steps in the last completed episode (for logging)
     int ep_hit;                  // 1 if TARGET_SUCCESS happened, else 0
     float last_d_perp;           // instantaneous for logging
     bool success_bonus_given;    // prevent double-adding the success bonus
@@ -460,15 +462,17 @@ float compute_reward(Tendril* env) {
     float d_perp_line = d_perp;                       // what we already computed
     float d_perp_ray  = (cosang >= 0.f) ? d_perp_line : r_mag;
     
-    // RESEARCHER'S EXACT SIMPLIFIED REWARD COMPONENTS:
-    float forward_bonus = 1.5f * cosang;                 // can go negative if pointing backward
-    float perp_penalty  = 0.010f * d_perp_ray;           // use ray-gated distance
-    float improvement   = 0.20f * fmaxf(0.f, d_err);
-    float shaped        = forward_bonus - perp_penalty + improvement;
-    env->rewards[0]     = shaped;
+    // HINGE FORWARD REWARD (unlock forward wins without drowning in negatives)
+    float forward_bonus = 2.0f * fmaxf(0.f, cosang);
+    float back_penalty  = 0.2f * fmaxf(0.f, -cosang);
+    float shaped        = forward_bonus - back_penalty - 0.010f * d_perp_ray + 0.20f * fmaxf(0.f, d_err);
     
-    // SUCCESS BONUS REMOVED - handled in c_step with success_bonus_given guard
+    // Add small baseline for early episodes to prevent deep negative returns
+    if (env->log.episodes < EASY_EPISODES) {
+        shaped += 0.05f;  // Small positive baseline
+    }
     
+    env->rewards[0] = shaped;
     return env->rewards[0];
 }
 
@@ -650,15 +654,15 @@ void generate_reachable_target(Tendril* env) {
     int attempts = 0;
     
     // CURRICULUM: Make early targets easy to find forward signal
-    int easy = env->log.episodes < 50; // first ~50 episodes across vec; tune if needed
+    int easy = env->log.episodes < 800; // first ~800 episodes across vec; tune if needed
     
     while (attempts < MAX_ATTEMPTS) {
         float candidate_x, candidate_y, candidate_z;
         if (easy) {
-            // tight forward cone, mid height
-            candidate_x = randf(30.0f, 70.0f);
-            candidate_y = randf(-10.0f, 10.0f);
-            candidate_z = randf(BASE_DEPTH + 35.0f, BASE_DEPTH + 55.0f);
+            // tighter cone + mid height for better gradients
+            candidate_x = randf(40.0f, 90.0f);
+            candidate_y = randf(-5.0f, 5.0f);
+            candidate_z = randf(BASE_DEPTH + 40.0f, BASE_DEPTH + 60.0f);
         } else {
             candidate_x = randf(0.0f, WORKSPACE_SIZE/2);
             candidate_y = randf(-WORKSPACE_SIZE/2, WORKSPACE_SIZE/2);

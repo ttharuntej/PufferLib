@@ -11,7 +11,7 @@ import numpy as np
 import gymnasium
 
 import pufferlib
-from pufferlib.ocean.tendril import binding
+from . import binding
 
 class Tendril(pufferlib.PufferEnv):
     def __init__(self, num_envs=1, render_mode='human', report_interval=1, buf=None, seed=0):
@@ -108,6 +108,11 @@ class Tendril(pufferlib.PufferEnv):
         # Optional debug (kept)
         self._step_count = getattr(self, '_step_count', 0) + 1
         
+        # SANITY CHECK: Verify episodes are resetting (debug termination issues)
+        if self._step_count % 2000 == 0:
+            print(f"[terms] {int(self.terminals.sum())} [truncs] {int(self.truncations.sum())}")
+            print(f"[episodes] {infos[0].get('episodes', 0)}")
+        
         # SANITY CHECK: Verify correct binding is loaded (temporary debug)
         if self._step_count % 500 == 0:
             print("[binding?]", "tendril_binding_version" in infos[0], infos[0].get("tendril_binding_version"))
@@ -123,12 +128,13 @@ class Tendril(pufferlib.PufferEnv):
     def render(self):
         """Render environment visualization"""
         if self.render_mode == 'human':
-            binding.vec_render(self.c_envs, 0)
+            binding.env_render(self.c_envs[0])
     
     def close(self):
         """Clean up environment resources"""
         if hasattr(self, 'c_envs'):
-            binding.vec_close(self.c_envs)
+            for c_env in self.c_envs:
+                binding.env_close(c_env)
     
     def get_hardware_specs(self):
         """Return hardware specifications for real-world deployment"""

@@ -55,6 +55,7 @@ void c_reset(Tendril* env) {
     env->ep_ang_sum = 0.0f;
     env->ep_dperp_sum = 0.0f;
     env->ep_steps = 0;
+    // Note: last_episode_steps is set during termination, not reset
     env->ep_hit = 0;
     env->success_bonus_given = false;
     
@@ -66,6 +67,27 @@ void c_reset(Tendril* env) {
     
     // Generate servo-reachable target (same as training)
     generate_reachable_target(env);
+    
+    // IK warm-start for early curriculum
+    if (env->log.episodes < EASY_EPISODES) {
+        float min_limit = 5.0f * M_PI/180.0f, max_limit = 175.0f * M_PI/180.0f;
+        ReachabilityResult sol = validate_target_reachability(
+            env->target_pos[0], env->target_pos[1], env->target_pos[2]);
+
+        if (sol.is_reachable) {
+            float n1 = (randf(-6, 6)) * M_PI/180.0f;
+            float n2 = (randf(-6, 6)) * M_PI/180.0f;
+            float n3 = (randf(-6, 6)) * M_PI/180.0f;
+            env->joint_angles[0] = clampf(sol.joint_angles[0] + n1, min_limit, max_limit);
+            env->joint_angles[1] = clampf(sol.joint_angles[1] + n2, min_limit, max_limit);
+            env->joint_angles[2] = clampf(sol.joint_angles[2] + n3, min_limit, max_limit);
+        } else {
+            float yaw = atan2f(env->target_pos[1], env->target_pos[0]);
+            env->joint_angles[0] = clampf(yaw + M_PI/2, min_limit, max_limit);
+            env->joint_angles[1] = clampf(120.0f * M_PI/180.0f, min_limit, max_limit);
+            env->joint_angles[2] = clampf( 90.0f * M_PI/180.0f, min_limit, max_limit);
+        }
+    }
     
     // Initialize target state
     env->target_state = TARGET_ACTIVE;
@@ -85,93 +107,81 @@ void c_reset(Tendril* env) {
     env->last_angular_error = env->angular_error;
 }
 
+// Simple c_step wrapper that calls the actual implementation from tendril.h
 void c_step(Tendril* env) {
     env->tick++;
     
-    // PROCESS ACTIONS - Apply joint angle changes (only if target is active)
-    if (env->target_state == TARGET_ACTIVE) {
-        for (int i = 0; i < NUM_JOINTS; i++) {
-            // Actions are in range [-1, 1], convert to angle deltas
-            // CONSERVATIVE: Prevent action saturation and entropy collapse  
-            float max_delta_per_step = 7.0f * M_PI / 180.0f; // 7°/step - prevents limit-hitting
-            float requested_delta = env->actions[i] * max_delta_per_step; // FIXED: Removed confusing sign flip
-            
-            // Apply servo speed limit (realistic MG996R physics)
-            float delta = clampf(requested_delta, -max_delta_per_step, max_delta_per_step);
-            env->joint_angles[i] += delta;
-            
-            // FIXED: Clamp to safe joint limits (5-175° safety margin)
-            float min_safe = 5.0f * M_PI / 180.0f;    // 5° minimum
-            float max_safe = 175.0f * M_PI / 180.0f;  // 175° maximum
-            env->joint_angles[i] = clampf(env->joint_angles[i], min_safe, max_safe);
-            
-            // Update velocity (simple finite difference)
-            env->joint_velocities[i] = delta / TAU;
-        }
+    // Apply joint actions with servo limits
+    for (int i = 0; i < NUM_JOINTS; i++) {
+        float delta = env->actions[i] * (7.5f * M_PI / 180.0f); // Fine precision control
+        float old_angle = env->joint_angles[i];
+        float new_angle = old_angle + delta;
+        
+        // Enforce servo limits (0-180°) 
+        float min_limit = 5.0f * M_PI / 180.0f;   // 5° safety margin
+        float max_limit = 175.0f * M_PI / 180.0f; // 175° safety margin
+        env->joint_angles[i] = clampf(new_angle, min_limit, max_limit);
+        
+        // Update velocity
+        env->joint_velocities[i] = (env->joint_angles[i] - old_angle) / TAU;
     }
     
-    // Update forward kinematics
+    // Update kinematics and compute reward
     compute_forward_kinematics(env);
+    env->rewards[0] = compute_reward(env);
     
-    // SIMPLE TRAINING LOGIC: Check if agent successfully pointed at target
-    if (env->angular_error < ANGULAR_THRESHOLD_RAD) {
+    // Warm-start success gate (auto-tightens after EASY_EPISODES)
+    float thr  = (env->log.episodes < EASY_EPISODES) ? (8.0f * M_PI/180.0f) : ANGULAR_THRESHOLD_RAD;
+    float hold = (env->log.episodes < EASY_EPISODES) ? 0.6f : STABILITY_DURATION;
+
+    if (env->angular_error < thr) {
         env->stability_timer += TAU;
-        
-        // SUCCESS: Agent pointed accurately and held steady
-        if (env->stability_timer >= STABILITY_DURATION && !env->success_bonus_given) {
-            env->rewards[0] += 50.0f;        // SUCCESS POP REWARD!
-            env->success_bonus_given = true; // don't double-count
+        if (env->stability_timer >= hold) {
+            if (!env->success_bonus_given) {
+                env->rewards[0] += 50.0f;   // add bonus first
+                env->success_bonus_given = true;
+            }
             env->target_state = TARGET_SUCCESS;
-            env->ep_hit = 1;                 // mark episode as "hit"
         }
     } else {
-        env->stability_timer = 0.0f;  // Reset if not accurate
+        env->stability_timer = 0.0f;
     }
+
+    // ✅ accumulate AFTER all modifications to rewards[0]
+    env->episode_return += env->rewards[0];
     
-    // NO TIMEOUT: Let agent try indefinitely (as user requested)
-    
-    // Compute reward based on distance to target (scaled down by 5x for easier critic training)
-    env->rewards[0] = compute_reward(env) / 5.0f;
-    
-    // FIXED: Update angular error tracking exactly once per step (expert feedback)
-    env->last_angular_error = env->angular_error;
-    
-    // NEW: record per-step telemetry + count hits once
-    {
-        float rx = env->target_pos[0] - env->end_effector_pos[0];
-        float ry = env->target_pos[1] - env->end_effector_pos[1];
-        float rz = env->target_pos[2] - env->end_effector_pos[2];
-        float px = env->pointing_direction[0];
-        float py = env->pointing_direction[1];
-        float pz = env->pointing_direction[2];
-        // |r × p| - perpendicular distance from laser beam to target
-        float cx = ry*pz - rz*py;
-        float cy = rz*px - rx*pz;
-        float cz = rx*py - ry*px;
-        float d_perp = sqrtf(cx*cx + cy*cy + cz*cz);
-        
-        int i = env->log.hist_idx % METRIC_BUF;
-        env->log.ang_err_hist[i] = env->angular_error;  // radians
-        env->log.dperp_hist[i]   = d_perp;              // mm
-        env->log.hist_idx++;
-        if (env->log.hist_count < METRIC_BUF) env->log.hist_count++;
+    // Episode termination with dynamic length
+    if (env->target_state == TARGET_SUCCESS) {
+        env->terminals[0] = true;
+        env->truncations[0] = false;
+    } else {
+        int max_steps = (env->log.episodes < 800) ? 400 : 800; // Dynamic episode length
+        if (env->tick >= max_steps) {
+            env->terminals[0] = false;
+            env->truncations[0] = true;
+        } else {
+            env->terminals[0] = false;
+            env->truncations[0] = false;
+        }
     }
-    if (env->target_state == TARGET_SUCCESS && !env->episode_success_recorded) {
-        env->log.hits += 1;
-        env->episode_success_recorded = true;
-    }
-    
-    // TRAINING EPISODE TERMINATION: Simple success-based ending
-    env->terminals[0] = (env->target_state == TARGET_SUCCESS);  // Episode ends when target reached
-    env->truncations[0] = (env->tick >= MAX_STEPS);             // Truncate at max steps
     
     // Update observations
     compute_observations(env);
     
-    // Episode telemetry accumulation (success pop reward fix)
+    // Telemetry
     env->ep_ang_sum += env->angular_error;
-    env->ep_dperp_sum += env->last_d_perp;  // was set in compute_reward
+    env->ep_dperp_sum += laser_miss_distance(env);
     env->ep_steps += 1;
+    
+    // Auto-reset after signaling done
+    if (env->terminals[0] || env->truncations[0]) {
+        env->last_episode_steps = env->ep_steps;
+
+        // >>> add this line so per-episode stats are recorded
+        add_log(env);
+
+        c_reset(env);
+    }
 }
 
 void c_render(Tendril* env) {
@@ -215,8 +225,10 @@ void c_render(Tendril* env) {
 }
 
 void c_close(Tendril* env) {
-    // Simple cleanup - no graphics client for binding
-    env->client = NULL;
+    if (env->client) {
+        close_client(env->client);  // calls CloseWindow() and free()
+        env->client = NULL;
+    }
 }
 
 void add_log(Tendril* env) {
@@ -925,12 +937,12 @@ static PyObject* vec_init(PyObject* self, PyObject* args, PyObject* kwargs) {
         env->truncations = &((bool*)PyArray_DATA((PyArrayObject*)trunc_arr))[i];
         
         init(env);
+        srand(seed + i);          // seed BEFORE reset (and per-env if you want variety)
         c_reset(env);
         
         vec->envs[i] = env;
     }
     
-    srand(seed);
     return PyLong_FromVoidPtr(vec);
 }
 
@@ -983,7 +995,7 @@ static PyObject* vec_log(PyObject* self, PyObject* args) {
         double hit_rate = (episodes > 0) ? ((double)hits / (double)episodes) : 0.0;
         PyDict_SetItemString(log_dict, "episodes", PyFloat_FromDouble((double)episodes));
         PyDict_SetItemString(log_dict, "hits",     PyFloat_FromDouble((double)hits));
-        PyDict_SetItemString(log_dict, "hit_rate", PyFloat_FromDouble(hit_rate));
+        PyDict_SetItemString(log_dict, "hit_rate_episodes", PyFloat_FromDouble(hit_rate));
         
         // Traditional metrics
         PyDict_SetItemString(log_dict, "success_rate", PyFloat_FromDouble(env->log.success_rate / fmaxf(env->log.n, 1.0f)));
@@ -1001,7 +1013,32 @@ static PyObject* vec_log(PyObject* self, PyObject* args) {
         PyDict_SetItemString(log_dict, "angular_error_rad_mean", PyFloat_FromDouble(env->log.mean_angular_error / denom));
         PyDict_SetItemString(log_dict, "angular_error_deg_mean", PyFloat_FromDouble(ang_deg_val));
         PyDict_SetItemString(log_dict, "d_perp_mm_mean", PyFloat_FromDouble(dperp_val));
-        PyDict_SetItemString(log_dict, "hit_rate", PyFloat_FromDouble(hit_rate_val));
+        PyDict_SetItemString(log_dict, "hit_rate_mean", PyFloat_FromDouble(hit_rate_val));
+        
+        // NEW: Additional metrics requested by reviewer
+        
+        // forward_frac: fraction of pointing directions that are forward-facing  
+        double forward_count = 0.0;
+        for (int i = 0; i < n; i++) {
+            // Compute cosine angle between pointing direction and target direction
+            // For this, we approximate: forward if angular error < 90° (cos > 0)
+            if (env->log.ang_err_hist[i] < (M_PI / 2.0)) {
+                forward_count += 1.0;
+            }
+        }
+        double forward_frac = (n > 0) ? (forward_count / n) : 0.0;
+        PyDict_SetItemString(log_dict, "forward_frac", PyFloat_FromDouble(forward_frac));
+        
+        // cosang_mean: mean cosine of angular error (forward-pointing measure)
+        double cosang_sum = 0.0;
+        for (int i = 0; i < n; i++) {
+            cosang_sum += cos(env->log.ang_err_hist[i]);
+        }
+        double cosang_mean = (n > 0) ? (cosang_sum / n) : 0.0;
+        PyDict_SetItemString(log_dict, "cosang_mean", PyFloat_FromDouble(cosang_mean));
+        
+        // steps_per_episode_last: steps in the most recently completed episode  
+        PyDict_SetItemString(log_dict, "steps_per_episode_last", PyFloat_FromDouble((double)env->last_episode_steps));
         
         // BINDING VERSION FOR SANITY CHECK  
         PyDict_SetItemString(log_dict, "tendril_binding_version", PyFloat_FromDouble(20250810.0));
