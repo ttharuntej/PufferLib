@@ -1,5 +1,13 @@
 #include "tendril.h"
 
+// Ensure raylib is available for standalone builds
+#ifdef TENDRIL_STANDALONE
+  #ifndef TENDRIL_WITH_RAYLIB
+  #define TENDRIL_WITH_RAYLIB 1
+  #endif
+  #include "raylib.h"
+#endif
+
 // randf is already defined in tendril.h
 
 // Clamp value between min and max
@@ -11,12 +19,13 @@ static inline float clampf(float value, float min, float max) {
 
 // 2D rendering doesn't need complex camera controls - much simpler and more stable!
 
+#ifdef TENDRIL_STANDALONE
 // Create rendering client with 2D interface (STABLE VERSION)
-Client* make_client(Tendril* env) {
+static Client* make_client(Tendril* env) {
     Client* client = (Client*)calloc(1, sizeof(Client));
     
     // Simple 2D window initialization - much more stable
-    InitWindow(WIDTH, HEIGHT, "🎯 Tendril Laser Pointer - 2D Multi-View (Stable)");
+    InitWindow(WIDTH, HEIGHT, TDRL_TXT("Tendril Laser Pointer - 2D Multi-View (Stable)"));
     SetTargetFPS(60);
     
     // No complex 3D camera setup needed for 2D rendering
@@ -28,18 +37,19 @@ Client* make_client(Tendril* env) {
 }
 
 // Close rendering client
-void close_client(Client* client) {
+static void close_client(Client* client) {
     CloseWindow();
     free(client);
 }
 
-void c_close(Tendril* env) {
+static void c_close(Tendril* env) {
     if (env->client) {
         close_client(env->client);
         env->client = NULL;
     }
 }
 
+#if 0 // DISABLED: Use binding.c version that uses TARGET_SUCCESS instead of distance
 // Add performance logging
 void add_log(Tendril* env) {
     // Calculate distance to target
@@ -57,9 +67,10 @@ void add_log(Tendril* env) {
     env->log.score += env->episode_return;
     env->log.n += 1.0f;
 }
+#endif
 
-// Reset environment for new episode
-void c_reset(Tendril* env) {
+// Reset environment for new episode (STANDALONE demo version)
+static void c_reset(Tendril* env) {
     env->episode_return = 0.0f;
     env->tick = 0;
     
@@ -73,7 +84,7 @@ void c_reset(Tendril* env) {
     generate_reachable_target(env);
     
     // FIX #1: IK WARM-START - Place agent near solution for early episodes
-    #define EASY_EPISODES 800
+    // EASY_EPISODES defined in tendril.h
     if (env->log.episodes < EASY_EPISODES) {
         ReachabilityResult sol = validate_target_reachability(
             env->target_pos[0], env->target_pos[1], env->target_pos[2]);
@@ -82,9 +93,9 @@ void c_reset(Tendril* env) {
 
         if (sol.is_reachable) {
             // Place near-solution with small noise so agent must stabilize
-            float n1 = (randf(-6, 6)) * M_PI/180.0f;
-            float n2 = (randf(-6, 6)) * M_PI/180.0f;
-            float n3 = (randf(-6, 6)) * M_PI/180.0f;
+            float n1 = (randf_env(env, -6, 6)) * M_PI/180.0f;
+            float n2 = (randf_env(env, -6, 6)) * M_PI/180.0f;
+            float n3 = (randf_env(env, -6, 6)) * M_PI/180.0f;
 
             env->joint_angles[0] = clampf(sol.joint_angles[0] + n1, min_limit, max_limit);
             env->joint_angles[1] = clampf(sol.joint_angles[1] + n2, min_limit, max_limit);
@@ -173,6 +184,7 @@ void c_reset(Tendril* env) {
 //     compute_observations(env);
 // }
 
+#ifdef TENDRIL_STANDALONE
 // Physics simulation step - FIXED VERSION
 void c_step(Tendril* env) {
     env->tick++;
@@ -198,18 +210,18 @@ void c_step(Tendril* env) {
     compute_forward_kinematics(env);
     
     // ---- Warm-start success criteria (bootstraps early hits) ----
-    #define EASY_EPISODES 800
+    // EASY_EPISODES defined in tendril.h
     #define EASY_ANG_DEG  8.0f    // looser early angle
     #define EASY_HOLD_S   0.6f    // shorter early hold
 
     float thr  = (env->log.episodes < EASY_EPISODES) ? (EASY_ANG_DEG * M_PI / 180.0f) : ANGULAR_THRESHOLD_RAD;
     float hold = (env->log.episodes < EASY_EPISODES) ? EASY_HOLD_S : STABILITY_DURATION;
     
-    // SANITY CHECK: Confirm success gate is active
-    if ((env->tick % 250) == 0 && env->log.episodes < EASY_EPISODES+5) {
-        printf("[succ-gate] thr=%.1f deg hold=%.2fs ep=%d tick=%d\n",
-               thr*180.0f/M_PI, hold, env->log.episodes, env->tick);
-    }
+    // SANITY CHECK: Confirm success gate is active (commented for clean training)
+    // if ((env->tick % 250) == 0 && env->log.episodes < EASY_EPISODES+5) {
+    //     printf("[succ-gate] thr=%.1f deg hold=%.2fs ep=%d tick=%d\n",
+    //            thr*180.0f/M_PI, hold, env->log.episodes, env->tick);
+    // }
 
     if (env->angular_error < thr) {
         env->stability_timer += TAU;
@@ -229,7 +241,6 @@ void c_step(Tendril* env) {
     // NO TIMEOUT: Let agent try indefinitely (as user requested)
     
     // FIX #2: SHORTER EPISODES for curriculum (more resets = more signal)
-    #define EASY_MAX_STEPS 200  // 4s at 50Hz
     bool easy = (env->log.episodes < EASY_EPISODES);
     
     // TRAINING EPISODE TERMINATION: Success or timeout with dynamic length
@@ -273,9 +284,11 @@ void c_step(Tendril* env) {
         printf("[AUTO-RESET] After reset, episodes now: %d\n", env->log.episodes);
     }
 }
+#endif // TENDRIL_STANDALONE
 
-// 2D visualization of tendril (STABLE VERSION)
-void c_render(Tendril* env) {
+#ifdef TENDRIL_STANDALONE
+// 2D visualization of tendril (STABLE VERSION - STANDALONE demo)
+static void c_render(Tendril* env) {
     // Handle window controls
     if (IsKeyDown(KEY_ESCAPE)) {
         c_close(env);
@@ -293,7 +306,7 @@ void c_render(Tendril* env) {
     
     // Right-click to generate new VALIDATED reachable target (for manual testing)
     if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
-        printf("🎯 Generating new validated reachable target...\n");
+        printf(TDRL_TXT("🎯 Generating new validated reachable target...\n"));
         generate_reachable_target(env);
         
         // Validate the new target
@@ -411,24 +424,24 @@ void draw_top_view(Tendril* env, Rectangle view, float scale) {
     DrawLineEx(center, servo_direction, 3, PUFF_RED);
     
     // Show ACTUAL 3-JOINT ARM CONSTRUCTION (realistic hardware representation)
-    float servo1_yaw = env->joint_angles[0] - M_PI/2;  // Center at 0°
+    float servo1_yaw = env->joint_angles[0] - M_PI/2;   // Center at 0°
     float servo2_pitch = env->joint_angles[1] - M_PI/2; // Convert to display angle
     float servo3_pitch = env->joint_angles[2] - M_PI/2;
+    float total_pitch = servo2_pitch + servo3_pitch;    // Combined pitch
     
-    // Calculate ACTUAL joint positions (3 segments like real hardware)
+    // Calculate ACTUAL joint positions with proper pitch projection
     Vector2 base_joint = center;  // Servo1 position (base)
     
-    // Joint2 position (end of first segment)
+    // Joint2 position (end of first segment) - project pitch into top view
     Vector2 joint2 = {
-        center.x + SEGMENT_LENGTH * cosf(servo1_yaw) * scale,
-        center.y + SEGMENT_LENGTH * sinf(servo1_yaw) * scale
+        center.x + (SEGMENT_LENGTH * cosf(servo1_yaw) * cosf(servo2_pitch)) * scale,
+        center.y + (SEGMENT_LENGTH * sinf(servo1_yaw) * cosf(servo2_pitch)) * scale
     };
     
-    // Joint3 position (end of second segment) - affected by both servo1 and servo2
-    float total_yaw_2 = servo1_yaw;  // Yaw carries through
+    // Joint3 position (end of second segment) - with combined pitch projection
     Vector2 joint3 = {
-        joint2.x + SEGMENT_LENGTH * cosf(total_yaw_2) * scale,
-        joint2.y + SEGMENT_LENGTH * sinf(total_yaw_2) * scale
+        joint2.x + (SEGMENT_LENGTH * cosf(servo1_yaw) * cosf(total_pitch)) * scale,
+        joint2.y + (SEGMENT_LENGTH * sinf(servo1_yaw) * cosf(total_pitch)) * scale
     };
     
     // End effector (tip) - affected by all 3 servos
@@ -475,7 +488,7 @@ void draw_top_view(Tendril* env, Rectangle view, float scale) {
     
     Color target_color;
     float target_size;
-    char* target_label;
+    const char* target_label;
     
     if (env->target_state == TARGET_SUCCESS) {
         target_color = PUFF_GREEN;
@@ -589,7 +602,7 @@ void draw_side_view(Tendril* env, Rectangle view, float scale) {
         float angle_deg = env->joint_angles[i] * 180/M_PI;
         if (angle_deg < 5.0f || angle_deg > 175.0f) {
             char warning[64];
-            sprintf(warning, "⚠️ SERVO%d AT LIMIT: %.0f°", i+1, angle_deg);
+            sprintf(warning, TDRL_TXT("⚠️ SERVO%d AT LIMIT: %.0f°"), i+1, angle_deg);
             Color warning_color = (angle_deg < 5.0f || angle_deg > 175.0f) ? PUFF_RED : ORANGE;
             DrawText(warning, view.x + 5, view.y + 20 + i*15, 10, warning_color);
         }
@@ -657,7 +670,7 @@ void draw_status_overlay(Tendril* env) {
         if (angle_deg < 10.0f || angle_deg > 170.0f) {
             char* servo_names[] = {"BASE", "SHOULDER", "ELBOW"};
             char limit_warning[64];
-            sprintf(limit_warning, "⚠️ %s NEAR LIMIT: %.0f°", servo_names[i], angle_deg);
+            sprintf(limit_warning, TDRL_TXT("⚠️ %s NEAR LIMIT: %.0f°"), servo_names[i], angle_deg);
             DrawText(limit_warning, 10, y_offset - 15 - i*12, 11, PUFF_RED);
         }
     }
@@ -678,7 +691,7 @@ void draw_status_overlay(Tendril* env) {
     
     char reachability_info[128];
     if (current_reach.is_reachable) {
-        sprintf(reachability_info, "✅ Target Reachable (Confidence: %.1f%%)", 
+        sprintf(reachability_info, TDRL_TXT("✅ Target Reachable (Confidence: %.1f%%)"), 
                 current_reach.confidence * 100);
         DrawText(reachability_info, 10, y_offset + 45, 11, PUFF_GREEN);
     } else {
@@ -689,7 +702,7 @@ void draw_status_overlay(Tendril* env) {
     // ANGULAR ERROR with color-coded feedback (ENHANCED DEBUG)
     float error_degrees = env->angular_error * 180.0f / M_PI;
     char angular_debug[128];
-    sprintf(angular_debug, "🎯 Angular Error: %.1f° (Target: <5°) | Stability: %.1fs", 
+    sprintf(angular_debug, TDRL_TXT("🎯 Angular Error: %.1f° (Target: <5°) | Stability: %.1fs"), 
             error_degrees, env->stability_timer);
     
     Color error_color;
@@ -713,21 +726,21 @@ void draw_status_overlay(Tendril* env) {
         if (angle_deg < -5.0f || angle_deg > 185.0f) {
             joints_valid = false;
             char warning[64];
-            sprintf(warning, "⚠️ SERVO%d OUT OF RANGE: %.1f°", i+1, angle_deg);
+            sprintf(warning, TDRL_TXT("⚠️ SERVO%d OUT OF RANGE: %.1f°"), i+1, angle_deg);
             DrawText(warning, 400, 50 + i*15, 10, PUFF_RED);
         }
     }
     
     if (joints_valid) {
-        DrawText("✅ All servos within valid range (0-180°)", 400, 50, 10, PUFF_GREEN);
+        DrawText(TDRL_TXT("✅ All servos within valid range (0-180°)"), 400, 50, 10, PUFF_GREEN);
     }
     
     // Enhanced Controls
     DrawText("ESC: Exit | TAB: Fullscreen | Right Click: New Reachable Target | Left Click: Place Target", 10, HEIGHT - 35, 11, GRAY);
-    DrawText("🟢 Green Line: Reachable Workspace | 🟡 Yellow: Reachable Target | 🔴 Red: Unreachable", 10, HEIGHT - 20, 11, GRAY);
+    DrawText(TDRL_TXT("🟢 Green Line: Reachable Workspace | 🟡 Yellow: Reachable Target | 🔴 Red: Unreachable"), 10, HEIGHT - 20, 11, GRAY);
     
     // Target state indicator - BIG AND CLEAR like Pong score
-    char* state_text = (env->target_state == TARGET_SUCCESS) ? "🎯 TARGET HIT!" : "🎯 AIMING...";
+    char* state_text = (env->target_state == TARGET_SUCCESS) ? TDRL_TXT("🎯 TARGET HIT!") : TDRL_TXT("🎯 AIMING...");
     Color state_color = (env->target_state == TARGET_SUCCESS) ? PUFF_GREEN : YELLOW;
     int font_size = (env->target_state == TARGET_SUCCESS) ? 24 : 16; // Bigger on success!
     DrawText(state_text, WIDTH - 200, 20, font_size, state_color);
@@ -834,7 +847,7 @@ void init_evaluation_sequence(Tendril* env) {
     env->target_pos[1] = env->target_sequence[0][1];
     env->target_pos[2] = env->target_sequence[0][2];
     
-    printf("🎯 EVALUATION SEQUENCE STARTED: %d targets\n", EVAL_SEQUENCE_LENGTH);
+    printf(TDRL_TXT("EVALUATION SEQUENCE STARTED: %d targets\n"), EVAL_SEQUENCE_LENGTH);
 }
 
 void generate_target_sequence(Tendril* env) {
@@ -853,24 +866,24 @@ void generate_target_sequence(Tendril* env) {
             if (difficulty < 0.33f) {
                 // EASY targets (close to center, high up)
                 float radius = 20.0f + difficulty * 30.0f;
-                float angle = randf(0, 2*M_PI);
+                float angle = randf_env(env, 0, 2*M_PI);
                 candidate[0] = radius * cosf(angle);
                 candidate[1] = radius * sinf(angle);
-                candidate[2] = BASE_DEPTH + 40.0f + randf(0, 20.0f);
+                candidate[2] = BASE_DEPTH + 40.0f + randf_env(env, 0, 20.0f);
             } else if (difficulty < 0.66f) {
                 // MEDIUM targets (moderate distance)
                 float radius = 30.0f + (difficulty - 0.33f) * 50.0f;
-                float angle = randf(0, 2*M_PI);
+                float angle = randf_env(env, 0, 2*M_PI);
                 candidate[0] = radius * cosf(angle);
                 candidate[1] = radius * sinf(angle);
-                candidate[2] = BASE_DEPTH + 25.0f + randf(0, 40.0f);
+                candidate[2] = BASE_DEPTH + 25.0f + randf_env(env, 0, 40.0f);
             } else {
                 // HARD targets (edge of workspace)
                 float radius = 60.0f + (difficulty - 0.66f) * 40.0f;
-                float angle = randf(0, 2*M_PI);
+                float angle = randf_env(env, 0, 2*M_PI);
                 candidate[0] = radius * cosf(angle);
                 candidate[1] = radius * sinf(angle);
-                candidate[2] = BASE_DEPTH + 15.0f + randf(0, 50.0f);
+                candidate[2] = BASE_DEPTH + 15.0f + randf_env(env, 0, 50.0f);
             }
             
             // Validate reachability
@@ -1040,7 +1053,7 @@ void print_evaluation_report(Tendril* env) {
     printf("============================================================\n");
     
     // Success metrics
-    printf("🎯 TARGET PERFORMANCE:\n");
+    printf(TDRL_TXT("🎯 TARGET PERFORMANCE:\n"));
     printf("   Targets Completed: %d/%d (%.1f%%)\n", 
            eval->targets_completed, EVAL_SEQUENCE_LENGTH,
            100.0f * eval->targets_completed / EVAL_SEQUENCE_LENGTH);
@@ -1055,7 +1068,7 @@ void print_evaluation_report(Tendril* env) {
     printf("   Direction Changes: %d (jitter indicator)\n", eval->direction_changes);
     
     // Pointing accuracy
-    printf("\n🎯 POINTING ACCURACY:\n");
+    printf(TDRL_TXT("\n🎯 POINTING ACCURACY:\n"));
     printf("   Average Angular Error: %.2f° (%.2f°)\n", 
            eval->avg_angular_error * 180/M_PI, ANGULAR_THRESHOLD_RAD * 180/M_PI);
     printf("   Best Accuracy: %.2f°\n", eval->best_angular_error * 180/M_PI);
@@ -1063,44 +1076,50 @@ void print_evaluation_report(Tendril* env) {
     
     // Training feedback
     printf("\n🔧 TRAINING FEEDBACK:\n");
-    printf("   Is Wiggly: %s\n", eval->is_wiggly ? "⚠️ YES - Consider reducing learning rate" : "✅ NO");
-    printf("   Is Slow: %s\n", eval->is_slow ? "⚠️ YES - Consider reward shaping" : "✅ NO");
-    printf("   Servo Limits Issue: %s\n", eval->has_servo_limits_issue ? "⚠️ YES - Check workspace" : "✅ NO");
+    printf("   Is Wiggly: %s\n", eval->is_wiggly ? TDRL_TXT("⚠️ YES - Consider reducing learning rate") : TDRL_TXT("✅ NO"));
+    printf("   Is Slow: %s\n", eval->is_slow ? TDRL_TXT("⚠️ YES - Consider reward shaping") : TDRL_TXT("✅ NO"));
+    printf("   Servo Limits Issue: %s\n", eval->has_servo_limits_issue ? TDRL_TXT("⚠️ YES - Check workspace") : TDRL_TXT("✅ NO"));
     printf("   Overall Confidence: %.1f%% %s\n", eval->confidence_score * 100, 
-           eval->confidence_score > 0.8f ? "🟢 EXCELLENT" :
-           eval->confidence_score > 0.6f ? "🟡 GOOD" :
-           eval->confidence_score > 0.4f ? "🟠 NEEDS WORK" : "🔴 POOR");
+           eval->confidence_score > 0.8f ? TDRL_TXT("🟢 EXCELLENT") :
+           eval->confidence_score > 0.6f ? TDRL_TXT("🟡 GOOD") :
+           eval->confidence_score > 0.4f ? TDRL_TXT("🟠 NEEDS WORK") : TDRL_TXT("🔴 POOR"));
     
     printf("============================================================\n");
 }
+#endif // TENDRIL_STANDALONE
 
-// Main demo function (for standalone testing)
+// Main demo function (for standalone testing)  
 #ifdef TENDRIL_STANDALONE
 int main() {
     srand(time(NULL));
     
     Tendril env = {0};
     allocate(&env);
+    
+    // FIXED: Initialize per-environment RNG (was missing!)
+    seed_rng(&env, (uint64_t)time(NULL) + 42);
+    
     c_reset(&env);
     
     printf("PufferLib Tendril Demo\\n");
     printf("Hardware specs: %d joints, %.0fmm segments\\n", NUM_JOINTS, SEGMENT_LENGTH);
-    printf("Observation space: 12D, Action space: 3D\\n\\n");
-    printf("Creating 3D visualization window...\\n");
+    printf("Observation space: 20D, Action space: 3D\\n\\n");
+    printf("Creating 2D visualization window...\\n");
     
     // Initialize the window first
     c_render(&env); // This creates the window
     
-    printf("3D Window created! Controls:\\n");
-    printf("- Mouse drag: Rotate camera\\n");
-    printf("- Mouse wheel: Zoom\\n");
+    printf("2D Window created! Controls:\\n");
+    printf("- TAB: Fullscreen toggle\\n");
+    printf("- Right click: New reachable target\\n");
+    printf("- Left click (in top view): Place target\\n");
     printf("- ESC: Exit\\n\\n");
     
     int frameCount = 0;
     while (!WindowShouldClose() && frameCount < 1800) { // Auto-exit after 30 seconds
         // Random actions for demo (gentle movements)
         for (int i = 0; i < NUM_JOINTS; i++) {
-            env.actions[i] = randf(-0.3f, 0.3f); // Gentle random motions
+            env.actions[i] = randf_env(&env, -0.3f, 0.3f); // Gentle random motions
         }
         
         c_step(&env);

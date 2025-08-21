@@ -1,129 +1,78 @@
-# PufferLib Tendril Training & Evaluation Commands
+# PufferLib Tendril Training Commands
 
-## 🚀 **Working Training Command (CPU)**
+Yep—you can make checkpoints totally explicit so there's no guessing. Do this:
 
-### **Memory-Optimized Training (Saves every 100k steps)**
+## 1) Train with periodic checkpoints to a known folder
+
+Pick a folder and interval, then run:
+
 ```bash
 puffer train puffer_tendril \
-    --train.device cpu \
-    --train.total-timesteps 10000000 \
-    --wandb --wandb-project "tendril-servo-limits" \
-    --vec.num-envs 4 \
-    --vec.num-workers 4 \
-    --train.batch-size 4096 \
-    --train.minibatch-size 1024 \
-    --train.update-epochs 4 \
-    --train.learning-rate 0.0001 \
-    --train.checkpoint-interval 100000
+  --train.device cpu --wandb --wandb-project tendril-prod --tag 3deg-long \
+  --train.name 3deg-long-r1 \
+  --train.data-dir ./checkpoints \
+  --train.checkpoint-interval 100000 \
+  --vec.num-workers 4 --vec.num-envs 16 \
+  --train.total-timesteps 3000000 \
+  --train.batch-size 4096 --train.minibatch-size 512 \
+  --train.update-epochs 3 \
+  --train.learning-rate 6e-4 --train.anneal-lr True \
+  --train.ent-coef 0.015 \
+  --train.clip-coef 0.2 --train.max-grad-norm 0.5 \
+  --train.vf-coef 1.0 --train.vf-clip-coef 0.2
 ```
 
-### **Alternative: Medium Frequency Saves (every 250k steps)**  
+* `--train.data-dir ./checkpoints` → where files go.
+* `--train.checkpoint-interval 100000` → saves every 100k steps.
+* With your fixed `close()` the trainer will also save one on graceful exit.
+
+## 2) Verify they're being written
+
+While it's running (or after), check:
+
+```bash
+find ./checkpoints -name "*.pt" -maxdepth 5
+```
+
+You should see something like:
+
+```
+./checkpoints/3deg-long-r1/puffer_tendril/step_100000.pt
+```
+
+## 3) Resume from a checkpoint
+
 ```bash
 puffer train puffer_tendril \
-    --train.device cpu \
-    --train.total-timesteps 10000000 \
-    --wandb --wandb-project "tendril-servo-limits" \
-    --vec.num-envs 4 \
-    --vec.num-workers 4 \
-    --train.batch-size 4096 \
-    --train.minibatch-size 1024 \
-    --train.update-epochs 4 \
-    --train.learning-rate 0.0001 \
-    --train.checkpoint-interval 250000
+  --load-model-path ./checkpoints/3deg-long-r1/puffer_tendril/step_100000.pt \
+  --train.device cpu --wandb --wandb-project tendril-prod --tag 3deg-long-resume \
+  --train.name 3deg-long-r2 \
+  --train.data-dir ./checkpoints \
+  --train.checkpoint-interval 100000 \
+  ... (same training flags as before)
 ```
 
-### **Previous Working Command (1M checkpoints - caused performance issues)**
+## 4) (Optional) Quick smoke test that saving works
+
+Do a tiny run that guarantees a checkpoint fast:
+
 ```bash
-# WARNING: This caused system slowdown due to keeping 1M steps in memory
 puffer train puffer_tendril \
-    --train.device cpu \
-    --train.total-timesteps 10000000 \
-    --wandb --wandb-project "tendril-servo-limits" \
-    --vec.num-envs 4 \
-    --vec.num-workers 4 \
-    --train.batch-size 4096 \
-    --train.minibatch-size 1024 \
-    --train.update-epochs 4 \
-    --train.learning-rate 0.0001 \
-    --train.checkpoint-interval 1000000
+  --train.total-timesteps 60000 \
+  --train.checkpoint-interval 20000 \
+  --train.data-dir ./checkpoints/smoke \
+  --vec.num-envs 4 --vec.num-workers 2 \
+  --train.batch-size 512 --train.minibatch-size 256
 ```
 
-## 🎯 **Model Evaluation Command**
+Then `find ./checkpoints/smoke -name "*.pt"` should list `step_20000.pt`, `step_40000.pt`, etc.
 
-### **LATEST MODEL (August 3, 2025) - Remote Server Model**
-```bash
-# Latest model from remote server - Step 977, compatible architecture
-puffer eval puffer_tendril \
-    --load-model-path experiments/puffer_tendril_8ft4hilg/model_puffer_tendril_000977.pt \
-    --render-mode human \
-    --train.device cpu \
-    --max-runs 2 \
-    --fps 10
-```
+## 5) Evaluate a saved model
 
-### **Previous Working Model (Local)**
 ```bash
 puffer eval puffer_tendril \
-    --load-model-path experiments/puffer_tendril_c1ldraya/model_puffer_tendril_002442.pt \
-    --render-mode human \
-    --train.device cpu \
-    --max-runs 2 \
-    --fps 10
+  --load-model-path ./checkpoints/3deg-long-r1/puffer_tendril/step_100000.pt \
+  --render-mode human --max-runs 10
 ```
 
-### **Generic Evaluation Template**
-```bash
-puffer eval puffer_tendril \
-    --load-model-path experiments/[EXPERIMENT_DIR]/[MODEL_FILE].pt \
-    --render-mode human \
-    --train.device cpu \
-    --max-runs 2 \
-    --fps 10
-```
-
-## 📊 **Training Results (August 3, 2025)**
-
-### **LATEST MODEL - Remote Server**
-- **Latest Model**: `experiments/puffer_tendril_8ft4hilg/model_puffer_tendril_000977.pt`
-- **Source**: Remote server (root@203.57.40.187:10095)
-- **Training Steps**: 977,000 (latest checkpoint)
-- **File Size**: 26KB (compatible architecture)
-- **Status**: ✅ Model loads successfully, ⚠️ Raylib memory issue
-
-### **Previous Local Model (August 2, 2025)**
-- **Model**: `experiments/puffer_tendril_c1ldraya/model_puffer_tendril_002442.pt`
-- **Training Steps**: 2,442,000 (completed)
-- **Training Time**: 1h 53m 22s
-- **Explained Variance**: 0.913 (excellent!)
-- **Entropy**: -0.744 (good convergence)
-- **SPS**: ~1.0K steps/second
-
-## 💡 **Key Parameters Explained**
-
-- `--train.checkpoint-interval 100000`: Saves model every 100k steps (vs 1M) to reduce memory usage and system load
-- `--vec.num-envs 4`: Number of parallel environments (matches CPU cores)
-- `--vec.num-workers 4`: Number of worker processes
-- `--train.batch-size 4096`: Training batch size
-- `--train.minibatch-size 1024`: Mini-batch size for gradient updates
-- `--train.learning-rate 0.0001`: Learning rate (stable for long training)
-
-## ⚠️ **Performance Notes**
-
-- **100k checkpoint interval**: Recommended for system stability
-- **250k checkpoint interval**: Good balance between performance and saves
-- **1M checkpoint interval**: Only use if you have >16GB RAM and can tolerate system slowdown
-
-The 100k checkpoint interval will create more model files but keep your system responsive during training.
-
-## 🐛 **Known Issues**
-
-### **Raylib Memory Management Issue**
-- **Problem**: Double free error in raylib/OpenGL system during evaluation
-- **Affects**: All evaluation commands with rendering
-- **Workaround**: Model loads successfully, but visualization crashes
-- **Status**: Model architecture is compatible, rendering system needs fix
-
-### **Model Compatibility**
-- ✅ **Remote model** (`puffer_tendril_8ft4hilg`) loads without state dict errors
-- ✅ **Local model** (`puffer_tendril_c1ldraya`) works but has same rendering issue
-- ❌ **Old model** (`puffer_tendril_j2bkiz50`) has incompatible architecture 
+If you don't see `.pt` files after adding `--train.data-dir` and `--train.checkpoint-interval`, tell me—either the logger's path builder is different in your fork or an exception is stopping `save_checkpoint()` before it runs.

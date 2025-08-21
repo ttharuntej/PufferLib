@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "numpy>=1.19.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tendril-binding"
+version = "1.0.0"
+description = "Tendril laser pointer environment C bindings"
+authors = [{name = "PufferLib Ocean"}]
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research", 
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: C",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "numpy>=1.19.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0",
+    "black",
+    "flake8"
+]
+
+[project.urls]
+Homepage = "https://github.com/PufferAI/PufferLib"
+Repository = "https://github.com/PufferAI/PufferLib"
+Issues = "https://github.com/PufferAI/PufferLib/issues"
+
+[tool.setuptools]
+zip-safe = false
+
+[tool.black]
+line-length = 100
+target-version = ['py38']
+
+[tool.flake8]
+max-line-length = 100
+extend-ignore = ["E203", "E501", "W503"]

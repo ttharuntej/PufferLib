@@ -3,7 +3,7 @@
 Setup script to compile tendril C bindings for Python
 """
 
-from distutils.core import setup, Extension
+from setuptools import setup, Extension
 import numpy as np
 import os
 
@@ -23,7 +23,7 @@ binding_module = Extension(
     ],
     library_dirs=[raylib_lib],
     libraries=['raylib'],
-    extra_compile_args=['-DPLATFORM_DESKTOP'],
+    extra_compile_args=['-DPLATFORM_DESKTOP', '-DTENDRIL_WITH_RAYLIB'],
     extra_link_args=[
         '-framework', 'Cocoa',
         '-framework', 'IOKit', 

@@ -1,10 +1,54 @@
+#ifndef TENDRIL_H_
+#define TENDRIL_H_
+
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <math.h>
 #include <time.h>
+
+// Macro for UTF-8 string portability (allows ASCII fallback on problematic toolchains)
+#ifndef TDRL_TXT
+  #define TDRL_TXT(x) x
+#endif
+
+// Raylib types: use real ones if raylib is enabled or already included; otherwise, light stubs
+#ifdef TENDRIL_WITH_RAYLIB
 #include "raylib.h"
+#elif defined(RAYLIB_H)  // raylib already included elsewhere
+  /* nothing */
+#else
+typedef struct { float x, y; } Vector2;
+typedef struct { float x, y, width, height; } Rectangle;
+typedef struct { unsigned char r, g, b, a; } Color;
+#endif
+
+// Portable M_PI definition
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+// MG996R servo specifications
+#define SERVO_SPEED_DEG_SEC 300.0f   // Increased for training (5x faster)
+#define SERVO_TORQUE_KG_CM 11.0f     // MG996R: 11 kg⋅cm stall torque
+
+// Achievable servo velocity normalization (not theoretical max)
+#define MAX_JOINT_VEL_RAD_S (SERVO_SPEED_DEG_SEC * 0.4f * (M_PI/180.0f))  // ≈2.094 rad/s
+
+// --- Servo/plant constants (3-DOF Tendril) ---
+#define CTRL_DT                 (1.0f/100.0f)  // control step = 10 ms
+static const float JOINT_VEL_MAX_DEG[3] = {180.f, 160.f, 160.f};   // deg/s (J0 yaw, J1 pitch, J2 pitch)
+static const float JOINT_ACC_MAX_DEG[3] = {900.f, 800.f, 800.f};   // deg/s^2
+static const float JOINT_MIN_DEG[3]     = {  5.f,  5.f,  10.f};   // servo domain limits [0..180°]
+static const float JOINT_MAX_DEG[3]     = {175.f,120.f, 170.f};
+
+#define CMD_LPF_ALPHA           0.35f         // command smoothing (0..1)
+#define VEL_DEADBAND_DEG_S      0.20f         // small dead zone to avoid buzz
+#define BACKLASH_DEG            0.20f         // gap consumed on direction flips
+#define CMD_LATENCY_STEPS       2             // 2 * 10 ms = 20 ms latency
+#define DAMPING_PER_SEC         0.12f         // viscous damping (12%/s)
 
 // HARDWARE-ACCURATE STL specifications (measured from actual files)
 #define BASE_WIDTH 60.0f      // Base.stl: 60×60×20mm (measured: -30 to +30)
@@ -21,10 +65,6 @@
 #define NUM_JOINTS 3          // 3 MG996R servos: Base(yaw) + Seg1(pitch) + Seg2(pitch)
 #define JOINT_LIMIT_DEG 180.0f // MG996R range: 0-180 degrees
 #define JOINT_LIMIT_RAD (JOINT_LIMIT_DEG * M_PI / 180.0f)
-
-// MG996R servo specifications
-#define SERVO_SPEED_DEG_SEC 300.0f   // Increased for training (5x faster)
-#define SERVO_TORQUE_KG_CM 11.0f     // MG996R: 11 kg⋅cm stall torque
 
 // Physics parameters
 #define TAU 0.02f             // 50Hz timestep (20ms)
@@ -117,11 +157,9 @@ struct Log {
     float hit_rate;           // [0,1], fraction of episodes with success
     EvaluationMetrics eval;   // NEW: Programmatic evaluation metrics
 
-    // NEW: rolling telemetry buffers
+    // NEW: rolling telemetry buffers (only used ones)
     float ang_err_hist[METRIC_BUF];  // radians
-    float dperp_hist[METRIC_BUF];    // millimeters
-    float dperp_line_hist[METRIC_BUF];    // line distance (different from ray distance)
-    float cosang_hist[METRIC_BUF];   // cosine of angular error
+    float dperp_hist[METRIC_BUF];    // millimeters (ray distance)
     int   hist_idx;
     int   hist_count;
 
@@ -132,6 +170,7 @@ struct Log {
     // NEW: episode accounting
     int episodes;
     int hits;
+    
 };
 
 typedef struct Client Client;  
@@ -141,11 +180,15 @@ struct Client {
     Vector2 last_mouse_pos;
 };
 
+// Curriculum constants (shared across observations and rewards)
+static const float TENDRIL_THRESHOLD_DEG[5] = {12.0f, 10.0f, 8.0f, 6.0f, 5.0f};
+static const float TENDRIL_HOLD_DURATIONS[5] = {0.4f, 0.6f, 0.8f, 1.2f, 2.0f};
+
 typedef struct Tendril Tendril;
 struct Tendril {
     // Required PufferLib fields
-    float* observations;      // [joint_angles(3), end_pos(3), target_pos(3), joint_vels(3), pointing_dir(3), angular_error(1), stability_timer(1)] = 17D
-    float* actions;          // [joint_angle_deltas(3)] = 3D
+    float* observations;      // [joint_sin_cos(6), end_pos(3), target_pos(3), joint_vels(3), pointing_dir(3), angular_error(1), stability_timer(1)] = 20D
+    float* actions;          // [velocity_setpoints_normalized(3)] = 3D (velocity commands in [-1,1])
     float* rewards;          // Reward signal
     bool* terminals;         // Episode termination (bool to match PufferEnv)
     bool* truncations;       // Episode truncation (bool to match PufferEnv)
@@ -161,6 +204,7 @@ struct Tendril {
     // Laser pointing state (NEW)
     float pointing_direction[3];        // Direction vector the laser points (normalized)
     float angular_error;                // Current angular error to target (radians)
+    float angular_error_ema;            // Smoothed angular error for stable gate (radians)
     float stability_timer;              // Time spent pointing accurately (seconds)
     float target_direction[3];          // Normalized direction from tip to target
     
@@ -198,20 +242,92 @@ struct Tendril {
     
     // FIXED: Per-joint smoothness tracking (from expert feedback)
     float prev_joint_vel[NUM_JOINTS];   // Previous joint velocities for acceleration calculation
-    float last_actions[NUM_JOINTS];     // Previous actions for control smoothness
 
     // NEW: to count a success once per episode
     bool episode_success_recorded;
+    
+    // Deferred reset flag (prevents obs/flags desync)
+    bool pending_reset;
+    
+    // Distance-delta shaping
+    float prev_dist_mm;      // previous distance to target for progress reward
+    
+    // Per-environment curriculum (reviewer's fix)
+    uint64_t steps;          // per-env step counter 
+    double sched_total_steps; // steps per this env to reach full difficulty
+    
+    // NEW: Hit-rate based curriculum
+    int curriculum_stage;    // 0..4 curriculum progression
+    float hit_rate_ema;      // exponential moving average of success rate
+    int episode_count;       // total episodes for this environment
+    
+    // NEW: Action smoothing and tracking
+    float last_actions[NUM_JOINTS];  // previous raw actions for analysis
+    float command_angles[NUM_JOINTS]; // last commanded angles for slew-rate limiting
+    int limit_streak[NUM_JOINTS];    // consecutive steps near hard limit (for stall detection)
+    
+    // Per-environment telemetry counters (reviewer's fix)
+    uint64_t limit_hits;     // servo limit violations this env
+    double jitter_sum_rad_per_s; // cumulative jitter this env
+    uint32_t log_steps;      // steps for telemetry normalization
+    
+    // NEW: Servo plant state (3-DOF) - Degrees-state for realistic servo dynamics
+    float joint_deg[3];           // current joint angles [deg]
+    float joint_vel_deg_s[3];     // current joint velocities [deg/s]
+    float cmd_filt_deg_s[3];      // filtered command [deg/s]
+    float last_cmd_norm[3];       // last raw action [-1,1], for obs/debug
+    int8_t sign_prev[3];          // previous command sign (-1,0,+1)
+    float backlash_remain_deg[3]; // remaining backlash to consume [deg]
+
+    // Simple fixed-latency queue per joint (command delay)
+    float cmd_queue_deg_s[3][CMD_LATENCY_STEPS];
+    int   cmd_queue_idx;
+
+    // Servo saturation accounting (per episode)
+    int   servo_saturated_step;   // 0/1 last step
+    int   servo_steps;            // steps in episode (denominator for limit_hits)
+    
+    // Per-environment thread-safe RNG state (xorshift64)
+    uint64_t rng_state;      // Thread-safe per-env random number generator
 };
 
+// Thread-safe per-environment RNG functions (xorshift64)
+static inline uint64_t xorshift64(uint64_t* state) {
+    uint64_t x = *state;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *state = x;
+    return x;
+}
+
+static inline void seed_rng(Tendril* env, uint64_t seed) {
+    env->rng_state = seed ? seed : 1; // xorshift64 can't have 0 state
+}
+
+static inline float randf_env(Tendril* env, float min, float max) {
+    uint64_t raw = xorshift64(&env->rng_state);
+    return min + ((float)(raw >> 32) / (float)UINT32_MAX) * (max - min);
+}
+
+static inline int rand_env(Tendril* env) {
+    return (int)(xorshift64(&env->rng_state) >> 32);
+}
+
 // Function declarations for PufferLib binding
+#if !defined(TENDRIL_STANDALONE)
+// Only exported in the binding/library build
 void c_reset(Tendril* env);
 void c_step(Tendril* env);
 void c_render(Tendril* env);
 void c_close(Tendril* env);
+#endif
+
+// Forward declaration for telemetry function
+static inline void update_telemetry_sanity(Tendril* env);
 
 // HARDWARE-ACCURATE Forward kinematics: Matches physical STL construction
-void compute_forward_kinematics(Tendril* env) {
+static inline void compute_forward_kinematics(Tendril* env) {
     // Hardware construction chain (user specification):
     // Base.stl → Servo1(yaw) → Segment1.stl → Servo2(pitch) → Segment2.stl → Servo3(pitch) → End_Cap.stl
     
@@ -223,6 +339,11 @@ void compute_forward_kinematics(Tendril* env) {
     float base_yaw = servo1_yaw - M_PI/2;         // Center yaw at 0°
     float shoulder_pitch = servo2_pitch - M_PI/2; // -90° to +90° pitch range
     float elbow_pitch = servo3_pitch - M_PI/2;    // -90° to +90° pitch range
+    
+    // Cache trigonometry (computed multiple times in FK)
+    const float cYaw = cosf(base_yaw), sYaw = sinf(base_yaw);
+    const float cSh  = cosf(shoulder_pitch), sSh  = sinf(shoulder_pitch);
+    const float cTot = cosf(shoulder_pitch + elbow_pitch), sTot = sinf(shoulder_pitch + elbow_pitch);
     
     // 1. BASE.STL position (origin platform) 
     float base_x = 0.0f;
@@ -236,9 +357,9 @@ void compute_forward_kinematics(Tendril* env) {
     
     // 3. SEGMENT1.STL position (attached to Servo1 horn, rotated by base_yaw)
     // Segment extends horizontally from servo1, then rotated by yaw
-    float segment1_end_x = servo1_x + SEGMENT_LENGTH * cosf(base_yaw) * cosf(shoulder_pitch);
-    float segment1_end_y = servo1_y + SEGMENT_LENGTH * sinf(base_yaw) * cosf(shoulder_pitch);  
-    float segment1_end_z = servo1_z + SEGMENT_LENGTH * sinf(shoulder_pitch);
+    float segment1_end_x = servo1_x + SEGMENT_LENGTH * cYaw * cSh;
+    float segment1_end_y = servo1_y + SEGMENT_LENGTH * sYaw * cSh;  
+    float segment1_end_z = servo1_z + SEGMENT_LENGTH * sSh;
     
     // 4. SERVO2 position (mounted in Segment1.stl gap)
     float servo2_x = segment1_end_x;
@@ -246,11 +367,10 @@ void compute_forward_kinematics(Tendril* env) {
     float servo2_z = segment1_end_z;
     
     // 5. SEGMENT2.STL position (attached to Servo2 horn, rotated by shoulder+elbow pitch)
-    // Second segment bends relative to first segment orientation
-    float total_pitch = shoulder_pitch + elbow_pitch;  // Cumulative bending
-    float segment2_end_x = servo2_x + SEGMENT_LENGTH * cosf(base_yaw) * cosf(total_pitch);
-    float segment2_end_y = servo2_y + SEGMENT_LENGTH * sinf(base_yaw) * cosf(total_pitch);
-    float segment2_end_z = servo2_z + SEGMENT_LENGTH * sinf(total_pitch);
+    // Second segment bends relative to first segment orientation (total_pitch = cTot/sTot)
+    float segment2_end_x = servo2_x + SEGMENT_LENGTH * cYaw * cTot;
+    float segment2_end_y = servo2_y + SEGMENT_LENGTH * sYaw * cTot;
+    float segment2_end_z = servo2_z + SEGMENT_LENGTH * sTot;
     
     // 6. SERVO3 position (mounted in Segment2.stl gap)  
     float servo3_x = segment2_end_x;
@@ -259,22 +379,20 @@ void compute_forward_kinematics(Tendril* env) {
     
     // 7. END_CAP.STL position (final pointing tip, attached to Servo3 horn)
     // End cap extends from servo3 position, using actual STL length (15mm)
-    // FIXED: Removed magic number - use pure kinematic chain
-    float endcap_pitch = total_pitch; // Sum of all joint contributions
-    env->end_effector_pos[0] = servo3_x + ENDCAP_LENGTH * cosf(base_yaw) * cosf(endcap_pitch);
-    env->end_effector_pos[1] = servo3_y + ENDCAP_LENGTH * sinf(base_yaw) * cosf(endcap_pitch);
-    env->end_effector_pos[2] = servo3_z + ENDCAP_LENGTH * sinf(endcap_pitch);
+    // End cap follows the total pitch direction (sum of all joint contributions)
+    env->end_effector_pos[0] = servo3_x + ENDCAP_LENGTH * cYaw * cTot;
+    env->end_effector_pos[1] = servo3_y + ENDCAP_LENGTH * sYaw * cTot;
+    env->end_effector_pos[2] = servo3_z + ENDCAP_LENGTH * sTot;
     
     // NEW: Calculate pointing direction (End_Cap.stl laser beam direction)
     // Hardware chain: Servo3 rotates End_Cap.stl which determines final pointing direction
     // The end cap points in the direction of the final segment after all rotations
-    // FIXED: Removed magic number - use pure geometric relationship
-    float final_pitch = total_pitch; // Sum of all preceding joint angles
+    // Pointing direction follows total pitch (sum of all joint contributions)
     
-    // Pointing direction from Servo3 position through End_Cap.stl tip
-    float pointing_x = cosf(base_yaw) * cosf(final_pitch);
-    float pointing_y = sinf(base_yaw) * cosf(final_pitch);
-    float pointing_z = sinf(final_pitch);
+    // Pointing direction from Servo3 position through End_Cap.stl tip (use cached trigs)
+    float pointing_x = cYaw * cTot;
+    float pointing_y = sYaw * cTot;
+    float pointing_z = sTot;
     
     // Normalize pointing direction vector (should already be normalized, but safety check)
     float pointing_mag = sqrtf(pointing_x*pointing_x + pointing_y*pointing_y + pointing_z*pointing_z);
@@ -315,44 +433,40 @@ void compute_forward_kinematics(Tendril* env) {
     dot_product = fmaxf(-1.0f, fminf(1.0f, dot_product));
     env->angular_error = acosf(dot_product);  // Angular error in radians
     
-    // Clamp to reasonable workspace (prevent extreme positions)
-    float max_reach = 2.0f * SEGMENT_LENGTH + BASE_DEPTH;
-    float current_reach = sqrtf(env->end_effector_pos[0]*env->end_effector_pos[0] + 
-                               env->end_effector_pos[1]*env->end_effector_pos[1]);
-    if (current_reach > max_reach) {
-        float scale = max_reach / current_reach;
-        env->end_effector_pos[0] *= scale;
-        env->end_effector_pos[1] *= scale;
-    }
-    
-    // Keep end effector above ground
+    // Keep end effector above ground (only Z constraint, no XY rescaling)
     if (env->end_effector_pos[2] < BASE_DEPTH) {
         env->end_effector_pos[2] = BASE_DEPTH;
     }
+    
+    // Update telemetry for sanity checks
+    update_telemetry_sanity(env);
 }
 
-// Compute observation vector (17D for laser pointing)
-void compute_observations(Tendril* env) {
+// Compute observation vector (20D for laser pointing)
+static inline void compute_observations(Tendril* env) {
     int idx = 0;
     
-    // Joint angles (normalized to [0, 1] from 0-180° MG996R range) [3D]
+    // Joint angles (sin/cos encoding to avoid wrap discontinuities) [6D]
     for (int i = 0; i < NUM_JOINTS; i++) {
-        env->observations[idx++] = env->joint_angles[i] / JOINT_LIMIT_RAD;
+        env->observations[idx++] = sinf(env->joint_angles[i]);
+        env->observations[idx++] = cosf(env->joint_angles[i]);
     }
     
-    // End effector position (normalized to workspace) [3D]
-    for (int i = 0; i < 3; i++) {
-        env->observations[idx++] = env->end_effector_pos[i] / WORKSPACE_SIZE;
-    }
+    // End effector position (centered and scaled for PPO) [3D]
+    const float XY_HALF = WORKSPACE_SIZE * 0.5f;
+    const float Z_REF   = BASE_DEPTH + WORKSPACE_SIZE * 0.25f;  // mid working height
+    env->observations[idx++] = env->end_effector_pos[0] / XY_HALF;      // ≈ [-1,1]
+    env->observations[idx++] = env->end_effector_pos[1] / XY_HALF;
+    env->observations[idx++] = (env->end_effector_pos[2] - Z_REF) / XY_HALF;  // centered Z
     
-    // Target position (normalized to workspace) [3D]
-    for (int i = 0; i < 3; i++) {
-        env->observations[idx++] = env->target_pos[i] / WORKSPACE_SIZE;
-    }
+    // Target position (centered and scaled for PPO) [3D]
+    env->observations[idx++] = env->target_pos[0] / XY_HALF;      // ≈ [-1,1]
+    env->observations[idx++] = env->target_pos[1] / XY_HALF;
+    env->observations[idx++] = (env->target_pos[2] - Z_REF) / XY_HALF;  // centered Z
     
-    // Joint velocities (normalized) [3D]
+    // Joint velocities (normalized by achievable servo speeds) [3D]
     for (int i = 0; i < NUM_JOINTS; i++) {
-        env->observations[idx++] = env->joint_velocities[i] / (JOINT_LIMIT_RAD / TAU);
+        env->observations[idx++] = env->joint_velocities[i] / MAX_JOINT_VEL_RAD_S;
     }
     
     // NEW: Pointing direction (already normalized) [3D]
@@ -363,10 +477,12 @@ void compute_observations(Tendril* env) {
     // NEW: Angular error (normalized to [0, 1], 0=perfect, 1=opposite) [1D]
     env->observations[idx++] = env->angular_error / M_PI;
     
-    // NEW: Stability timer (normalized to stability duration) [1D]
-    env->observations[idx++] = fminf(env->stability_timer / STABILITY_DURATION, 1.0f);
+    // NEW: Stability timer (normalized to current stage requirement) [1D]
+    // Use stage-based hold duration for proper normalization
+    float current_hold_req = TENDRIL_HOLD_DURATIONS[env->curriculum_stage];
+    env->observations[idx++] = fminf(env->stability_timer / current_hold_req, 1.0f);
     
-    // Total: 3 + 3 + 3 + 3 + 3 + 1 + 1 = 17D
+    // Total: 6 + 3 + 3 + 3 + 3 + 1 + 1 = 20D
 }
 
 // NEW Reward function: encourage accurate laser pointing with stability
@@ -434,7 +550,7 @@ void compute_observations(Tendril* env) {
     
 //     return total_reward;
 // }
-float compute_reward(Tendril* env) {
+static inline float compute_reward(Tendril* env) {
     
     // SIMPLIFIED REWARD: Make gradients show up immediately
     float cosang = env->pointing_direction[0]*env->target_direction[0]
@@ -462,10 +578,23 @@ float compute_reward(Tendril* env) {
     float d_perp_line = d_perp;                       // what we already computed
     float d_perp_ray  = (cosang >= 0.f) ? d_perp_line : r_mag;
     
-    // HINGE FORWARD REWARD (unlock forward wins without drowning in negatives)
-    float forward_bonus = 2.0f * fmaxf(0.f, cosang);
-    float back_penalty  = 0.2f * fmaxf(0.f, -cosang);
-    float shaped        = forward_bonus - back_penalty - 0.010f * d_perp_ray + 0.20f * fmaxf(0.f, d_err);
+    // ENHANCED COSINE REWARD: Make orientation matter from the start
+    float cos_term = 1.0f * cosang;                   // ↑ weight (was 2.0f forward bonus)
+    float perp_term = -0.005f * d_perp_ray;           // gentler (was -0.010f)
+    float progress_term = 0.20f * fmaxf(0.f, d_err);  // keep same
+    float back_pen = 0.05f * fmaxf(0.f, -cosang);     // lighter back penalty (was 0.2f)
+    
+    // Optional: proximity penalty to push away from servo limits (unified per-joint limits)
+    float proximity_penalty = 0.0f;
+    for (int i = 0; i < NUM_JOINTS; i++) {
+        float a = env->joint_angles[i];
+        float min_r = JOINT_MIN_DEG[i]*M_PI/180.f, max_r = JOINT_MAX_DEG[i]*M_PI/180.f;
+        float prox = fmaxf(0.f, (min_r + 5*M_PI/180.f) - a) + 
+                     fmaxf(0.f, a - (max_r - 5*M_PI/180.f));
+        proximity_penalty += 0.02f * prox;
+    }
+    
+    float shaped = cos_term + perp_term + progress_term - back_pen - proximity_penalty;
     
     // Add small baseline for early episodes to prevent deep negative returns
     if (env->log.episodes < EASY_EPISODES) {
@@ -477,9 +606,17 @@ float compute_reward(Tendril* env) {
 }
 
 // Initialize tendril environment
-void init(Tendril* env) {
+static inline void init(Tendril* env) {
     env->tick = 0;
+    env->pending_reset = false;  // Initialize deferred reset flag
     memset(&env->log, 0, sizeof(Log));
+
+    // NEW: Initialize curriculum/stats defaults for all builds (expert fix)
+    env->curriculum_stage = 0;
+    env->hit_rate_ema = 0.0f;
+    env->episode_count = 0;
+    env->steps = 0;
+    env->sched_total_steps = 0.0;  // Legacy telemetry compatibility
     
     // Initialize joint limits (0 to 180 degrees for servos)
     for (int i = 0; i < NUM_JOINTS; i++) {
@@ -495,9 +632,9 @@ void init(Tendril* env) {
 }
 
 // Allocate memory for PufferLib interface
-void allocate(Tendril* env) {
+static inline void allocate(Tendril* env) {
     init(env);
-    env->observations = (float*)calloc(17, sizeof(float));  // 17D observation (pointing + stability)
+    env->observations = (float*)calloc(20, sizeof(float));  // 20D observation (sin/cos angles + pointing + stability)
     env->actions = (float*)calloc(3, sizeof(float));        // 3D action
     env->rewards = (float*)calloc(1, sizeof(float));
     env->terminals = (bool*)calloc(1, sizeof(bool));
@@ -505,12 +642,12 @@ void allocate(Tendril* env) {
 }
 
 // Free allocated memory
-void free_allocated(Tendril* env) {
-    free(env->observations);
-    free(env->actions);
-    free(env->rewards);
-    free(env->terminals);
-    free(env->truncations);
+static inline void free_allocated(Tendril* env) {
+    free(env->observations); env->observations = NULL;
+    free(env->actions);      env->actions = NULL;
+    free(env->rewards);      env->rewards = NULL;
+    free(env->terminals);    env->terminals = NULL;
+    free(env->truncations);  env->truncations = NULL;
 }
 
 // Utility functions
@@ -518,19 +655,32 @@ static inline float randf(float min, float max) {
     return min + ((float)rand() / (float)RAND_MAX) * (max - min);
 }
 
-// NEW: perpendicular miss distance from beam line to target
-static inline float laser_miss_distance(const Tendril* env) {
+// Utility function: laser miss distance calculation
+static inline float laser_miss_distance(Tendril* env) {
     float rx = env->target_pos[0] - env->end_effector_pos[0];
     float ry = env->target_pos[1] - env->end_effector_pos[1];
     float rz = env->target_pos[2] - env->end_effector_pos[2];
-    float px = env->pointing_direction[0];
-    float py = env->pointing_direction[1];
-    float pz = env->pointing_direction[2];
-    // |r × p|
-    float cx = ry*pz - rz*py;
-    float cy = rz*px - rx*pz;
-    float cz = rx*py - ry*px;
+    
+    // d_perp = || r × pointing_dir || (perpendicular distance from laser beam to target)
+    float cx = ry*env->pointing_direction[2] - rz*env->pointing_direction[1];
+    float cy = rz*env->pointing_direction[0] - rx*env->pointing_direction[2]; 
+    float cz = rx*env->pointing_direction[1] - ry*env->pointing_direction[0];
     return sqrtf(cx*cx + cy*cy + cz*cz);
+}
+
+// Add telemetry for sanity checks
+static inline void update_telemetry_sanity(Tendril* env) {
+    // Track pointing direction norm (should be ~1.0)
+    float pointing_mag = sqrtf(env->pointing_direction[0]*env->pointing_direction[0] +
+                              env->pointing_direction[1]*env->pointing_direction[1] +
+                              env->pointing_direction[2]*env->pointing_direction[2]);
+    env->log.pointing_dir_norm = pointing_mag;
+    
+    // Track target direction norm (should be ~1.0) 
+    float target_mag = sqrtf(env->target_direction[0]*env->target_direction[0] +
+                            env->target_direction[1]*env->target_direction[1] +
+                            env->target_direction[2]*env->target_direction[2]);
+    env->log.target_dir_norm = target_mag;
 }
 
 // SERVO REACHABILITY VALIDATION - First Principles Implementation
@@ -542,7 +692,7 @@ typedef struct {
 } ReachabilityResult;
 
 // CORRECTED: 2D Table-Mounted Servo Inverse Kinematics (0-180° servos)
-ReachabilityResult validate_target_reachability(float target_x, float target_y, float target_z) {
+static inline ReachabilityResult validate_target_reachability(float target_x, float target_y, float target_z) {
     ReachabilityResult result = {false, {0, 0, 0}, 0.0f, 0.0f};
     
     // CRITICAL: Target must be ABOVE table (servos can't point below table)
@@ -612,27 +762,29 @@ ReachabilityResult validate_target_reachability(float target_x, float target_y, 
     // Convert to servo2 angle: 0° = down, 90° = horizontal, 180° = up
     float servo2_angle = shoulder_angle_rad + M_PI/2;  // Add 90° to make 90° = horizontal
     
-    // 5. VALIDATE ALL SERVO LIMITS (5-175° safety margins) - FIXED: Match runtime constraints
-    float min_safe = 5.0f * M_PI / 180.0f;    // 5° minimum safety margin
-    float max_safe = 175.0f * M_PI / 180.0f;  // 175° maximum safety margin
+    // 5. VALIDATE ALL SERVO LIMITS (unified JOINT_MIN/MAX_DEG) - FIXED: Match runtime constraints
+    const float min_safe[3] = {
+        JOINT_MIN_DEG[0]*M_PI/180.f, JOINT_MIN_DEG[1]*M_PI/180.f, JOINT_MIN_DEG[2]*M_PI/180.f };
+    const float max_safe[3] = {
+        JOINT_MAX_DEG[0]*M_PI/180.f, JOINT_MAX_DEG[1]*M_PI/180.f, JOINT_MAX_DEG[2]*M_PI/180.f };
     
-    if (servo1_angle < min_safe || servo1_angle > max_safe ||
-        servo2_angle < min_safe || servo2_angle > max_safe ||
-        servo3_angle < min_safe || servo3_angle > max_safe) {
+    if (servo1_angle < min_safe[0] || servo1_angle > max_safe[0] ||
+        servo2_angle < min_safe[1] || servo2_angle > max_safe[1] ||
+        servo3_angle < min_safe[2] || servo3_angle > max_safe[2]) {
         return result;  // Joint limits exceeded (with safety margins)
     }
     
     // 6. ADDITIONAL 2D WORKSPACE CONSTRAINTS
-    // Ensure servo2 doesn't point below horizontal (can't reach under table)
-    if (servo2_angle < M_PI/4) {  // Below 45° is problematic for table-mounted arm
-        return result;  // Too close to table surface
+    // Use unified servo limits instead of hardcoded values
+    if (servo2_angle < min_safe[1]) {
+        return result;  // Too close to table surface (handled by unified limits)
     }
     
-    // 7. CALCULATE SOLUTION QUALITY METRICS (FIXED: Use consistent safety margins)
+    // 7. CALCULATE SOLUTION QUALITY METRICS (FIXED: Use unified safety margins)
     float limit_margins[3] = {
-        fminf(servo1_angle - min_safe, max_safe - servo1_angle),
-        fminf(fmaxf(servo2_angle - M_PI/4, servo2_angle - min_safe), max_safe - servo2_angle),  // Table + safety constraints
-        fminf(servo3_angle - min_safe, max_safe - servo3_angle)
+        fminf(servo1_angle - min_safe[0], max_safe[0] - servo1_angle),
+        fminf(servo2_angle - min_safe[1], max_safe[1] - servo2_angle),
+        fminf(servo3_angle - min_safe[2], max_safe[2] - servo3_angle)
     };
     
     result.min_distance_to_limits = fminf(limit_margins[0], fminf(limit_margins[1], limit_margins[2]));
@@ -649,7 +801,7 @@ ReachabilityResult validate_target_reachability(float target_x, float target_y, 
 }
 
 // Generate reachable target within servo constraints
-void generate_reachable_target(Tendril* env) {
+static inline void generate_reachable_target(Tendril* env) {
     const int MAX_ATTEMPTS = 50;  // Prevent infinite loops
     int attempts = 0;
     
@@ -660,13 +812,13 @@ void generate_reachable_target(Tendril* env) {
         float candidate_x, candidate_y, candidate_z;
         if (easy) {
             // tighter cone + mid height for better gradients
-            candidate_x = randf(40.0f, 90.0f);
-            candidate_y = randf(-5.0f, 5.0f);
-            candidate_z = randf(BASE_DEPTH + 40.0f, BASE_DEPTH + 60.0f);
+            candidate_x = randf_env(env, 40.0f, 90.0f);
+            candidate_y = randf_env(env, -5.0f, 5.0f);
+            candidate_z = randf_env(env, BASE_DEPTH + 40.0f, BASE_DEPTH + 60.0f);
         } else {
-            candidate_x = randf(0.0f, WORKSPACE_SIZE/2);
-            candidate_y = randf(-WORKSPACE_SIZE/2, WORKSPACE_SIZE/2);
-            candidate_z = randf(BASE_DEPTH + 10, BASE_DEPTH + WORKSPACE_SIZE/2);
+            candidate_x = randf_env(env, 0.0f, WORKSPACE_SIZE/2);
+            candidate_y = randf_env(env, -WORKSPACE_SIZE/2, WORKSPACE_SIZE/2);
+            candidate_z = randf_env(env, BASE_DEPTH + 10, BASE_DEPTH + WORKSPACE_SIZE/2);
         }
         
         // Validate reachability
@@ -688,7 +840,7 @@ void generate_reachable_target(Tendril* env) {
     float safe_reach = SEGMENT_LENGTH * 0.6f;  // Only 60% reach to ensure safety
     // FIXED: Only use forward-hemisphere angles (x >= 0)
     float safe_angles[] = {-M_PI/2, -M_PI/4, 0.0f, M_PI/4, M_PI/2};  // -90° to +90°
-    int angle_index = rand() % 5;
+    int angle_index = rand_env(env) % 5;
     float safe_angle = safe_angles[angle_index];
     
     // Generate and validate fallback target
@@ -710,16 +862,15 @@ void generate_reachable_target(Tendril* env) {
     }
 }
 
-// Function declarations (implementations in binding.c)
-void c_reset(Tendril* env);
-void c_step(Tendril* env);
-void c_render(Tendril* env);
-void c_close(Tendril* env);
+// Additional function declarations (implementations in binding.c)
+#if !defined(TENDRIL_STANDALONE)
 void add_log(Tendril* env);
 Client* make_client(Tendril* env);
 void close_client(Client* client);
+#endif
 
 // 2D Rendering function declarations (stable visualization)
+#if !defined(TENDRIL_STANDALONE)
 void draw_2d_views(Tendril* env);
 void draw_top_view(Tendril* env, Rectangle view, float scale);
 void draw_side_view(Tendril* env, Rectangle view, float scale);
@@ -729,12 +880,14 @@ void draw_status_overlay(Tendril* env);
 // Workspace visualization functions
 void draw_reachable_workspace_top(Tendril* env, Vector2 center, float scale);
 void draw_reachable_workspace_side(Tendril* env, Vector2 base_pos, float scale);
+#endif
 
 // AUTOMATIC EVALUATION SYSTEM (Drone-inspired)
 void init_evaluation_sequence(Tendril* env);
 void generate_target_sequence(Tendril* env);
 void update_evaluation_metrics(Tendril* env);
 void advance_to_next_target(Tendril* env);
-void calculate_movement_quality(Tendril* env);
 void detect_training_issues(Tendril* env);
 void print_evaluation_report(Tendril* env);
+
+#endif // TENDRIL_H_

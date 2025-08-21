@@ -4,7 +4,7 @@
 #include "tendril_clean.h"
 
 int main() {
-    printf("🎯 Tendril Clean Architecture Demo\n");
+    printf(TDRL_TXT("🎯 Tendril Clean Architecture Demo\n"));
     printf("==================================\n");
     
     // Initialize random seed
@@ -15,7 +15,7 @@ int main() {
     memset(&env, 0, sizeof(Tendril));
     
     // Allocate observation/action arrays manually
-    env.observations = (float*)calloc(17, sizeof(float));
+    env.observations = (float*)calloc(20, sizeof(float));  // 20D observation space
     env.actions = (float*)calloc(3, sizeof(float));
     env.rewards = (float*)calloc(1, sizeof(float));
     env.terminals = (bool*)calloc(1, sizeof(bool));
@@ -25,10 +25,10 @@ int main() {
     init(&env);
     c_reset(&env);
     
-    printf("✅ Environment initialized successfully\n");
-    printf("📊 Observation space: 17D\n");
+    printf(TDRL_TXT("✅ Environment initialized successfully\n"));
+    printf("📊 Observation space: 20D\n");
     printf("🎮 Action space: 3D\n");
-    printf("🎯 Target position: (%.1f, %.1f, %.1f)mm\n", 
+    printf(TDRL_TXT("🎯 Target position: (%.1f, %.1f, %.1f)mm\n"), 
            env.target_pos[0], env.target_pos[1], env.target_pos[2]);
     
     // Validate target reachability
@@ -36,7 +36,7 @@ int main() {
         env.target_pos[0], env.target_pos[1], env.target_pos[2]);
     
     printf("🔍 Target reachability: %s (Confidence: %.1f%%)\n",
-           result.is_reachable ? "✅ REACHABLE" : "❌ UNREACHABLE",
+           result.is_reachable ? TDRL_TXT("✅ REACHABLE") : TDRL_TXT("❌ UNREACHABLE"),
            result.confidence * 100);
     
     if (result.is_reachable) {
@@ -73,7 +73,7 @@ int main() {
         
         // Break if target hit
         if (env.target_state == TARGET_SUCCESS) {
-            printf("🎯 TARGET HIT! Angular error: %.1f°\n", 
+            printf(TDRL_TXT("🎯 TARGET HIT! Angular error: %.1f°\n"), 
                    env.angular_error * 180/M_PI);
             break;
         }
@@ -94,7 +94,7 @@ int main() {
     free(env.terminals);
     free(env.truncations);
     
-    printf("✅ Demo completed successfully!\n");
+    printf(TDRL_TXT("✅ Demo completed successfully!\n"));
     
     return 0;
 }

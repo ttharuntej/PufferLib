@@ -11,7 +11,11 @@ import numpy as np
 import gymnasium
 
 import pufferlib
-from . import binding
+try:
+    from . import binding
+except ImportError:
+    # Fallback for when running from different directory
+    import binding
 
 class Tendril(pufferlib.PufferEnv):
     def __init__(self, num_envs=1, render_mode='human', report_interval=1, buf=None, seed=0):
@@ -24,9 +28,9 @@ class Tendril(pufferlib.PufferEnv):
             buf: Optional pre-allocated buffer
             seed: Random seed
         """
-        # Observation space: [joint_angles(3), end_pos(3), target_pos(3), joint_vels(3), pointing_dir(3), angular_error(1), stability_timer(1)] = 17D
+        # Observation space: [joint_sin_cos(6), end_pos(3), target_pos(3), joint_vels(3), pointing_dir(3), angular_error(1), stability_timer(1)] = 20D
         self.single_observation_space = gymnasium.spaces.Box(
-            low=-1.0, high=1.0, shape=(17,), dtype=np.float32
+            low=-1.0, high=1.0, shape=(20,), dtype=np.float32
         )
         
         # Action space: [joint_angle_deltas(3)] = 3D  
@@ -65,8 +69,6 @@ class Tendril(pufferlib.PufferEnv):
             return {}
 
         # Map synonyms -> canonical keys expected in dashboards
-        if 'angular_error_deg_mean' not in info and 'angular_error_mean_deg' in info:
-            info['angular_error_deg_mean'] = info['angular_error_mean_deg']
         if 'd_perp_mm_mean' not in info and 'miss_distance_mean_mm' in info:
             info['d_perp_mm_mean'] = info['miss_distance_mean_mm']
 
@@ -128,13 +130,16 @@ class Tendril(pufferlib.PufferEnv):
     def render(self):
         """Render environment visualization"""
         if self.render_mode == 'human':
-            binding.env_render(self.c_envs[0])
+            binding.vec_render(self.c_envs, 0)
     
     def close(self):
         """Clean up environment resources"""
-        if hasattr(self, 'c_envs'):
-            for c_env in self.c_envs:
-                binding.env_close(c_env)
+        if hasattr(self, "c_envs"):
+            if isinstance(self.c_envs, int):
+                binding.vec_close(self.c_envs)
+            elif isinstance(self.c_envs, (list, tuple)):
+                for c_env in self.c_envs:
+                    binding.env_close(c_env)
     
     def get_hardware_specs(self):
         """Return hardware specifications for real-world deployment"""
