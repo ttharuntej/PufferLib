@@ -190,8 +190,8 @@ struct Tendril {
     float* observations;      // [joint_sin_cos(6), end_pos(3), target_pos(3), joint_vels(3), pointing_dir(3), angular_error(1), stability_timer(1)] = 20D
     float* actions;          // [velocity_setpoints_normalized(3)] = 3D (velocity commands in [-1,1])
     float* rewards;          // Reward signal
-    bool* terminals;         // Episode termination (bool to match PufferEnv)
-    bool* truncations;       // Episode truncation (bool to match PufferEnv)
+    unsigned char* terminals;         // Episode termination flag (0 or 1)
+    unsigned char* truncations;       // Episode truncation flag (0 or 1)
     Log log;                 // Performance logging
     Client* client;          // Rendering client
     
@@ -637,8 +637,8 @@ static inline void allocate(Tendril* env) {
     env->observations = (float*)calloc(20, sizeof(float));  // 20D observation (sin/cos angles + pointing + stability)
     env->actions = (float*)calloc(3, sizeof(float));        // 3D action
     env->rewards = (float*)calloc(1, sizeof(float));
-    env->terminals = (bool*)calloc(1, sizeof(bool));
-    env->truncations = (bool*)calloc(1, sizeof(bool));
+    env->terminals = (unsigned char*)calloc(1, sizeof(unsigned char));
+    env->truncations = (unsigned char*)calloc(1, sizeof(unsigned char));
 }
 
 // Free allocated memory

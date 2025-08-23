@@ -399,8 +399,8 @@ void c_step(Tendril* env) {
     bool stall_terminal = stall;  // Early termination for limit stalls
     bool timeout_truncation = (env->tick >= max_steps);
     
-    env->terminals[0] = success_terminal || stall_terminal;
-    env->truncations[0] = (!env->terminals[0] && timeout_truncation);
+    env->terminals[0] = (unsigned char)((success_terminal || stall_terminal) ? 1 : 0);
+    env->truncations[0] = (unsigned char)((!env->terminals[0] && timeout_truncation) ? 1 : 0);
     
     // Update observations
     compute_observations(env);
@@ -1169,8 +1169,8 @@ static PyObject* env_init(PyObject* self, PyObject* args) {
     env->observations = (float*)PyArray_DATA((PyArrayObject*)obs_arr);
     env->actions = (float*)PyArray_DATA((PyArrayObject*)act_arr);
     env->rewards = (float*)PyArray_DATA((PyArrayObject*)rew_arr);
-    env->terminals = (bool*)PyArray_DATA((PyArrayObject*)term_arr);
-    env->truncations = (bool*)PyArray_DATA((PyArrayObject*)trunc_arr);
+    env->terminals = (unsigned char*)PyArray_DATA((PyArrayObject*)term_arr);
+    env->truncations = (unsigned char*)PyArray_DATA((PyArrayObject*)trunc_arr);
     
     init(env);
     seed_rng(env, seed);
@@ -1422,8 +1422,8 @@ static PyObject* vec_init(PyObject* self, PyObject* args, PyObject* kwargs) {
         env->observations = &((float*)PyArray_DATA((PyArrayObject*)obs_arr))[i * 20]; // 20D obs
         env->actions = &((float*)PyArray_DATA((PyArrayObject*)act_arr))[i * 3];       // 3D actions  
         env->rewards = &((float*)PyArray_DATA((PyArrayObject*)rew_arr))[i];
-        env->terminals = &((bool*)PyArray_DATA((PyArrayObject*)term_arr))[i];
-        env->truncations = &((bool*)PyArray_DATA((PyArrayObject*)trunc_arr))[i];
+        env->terminals = &((unsigned char*)PyArray_DATA((PyArrayObject*)term_arr))[i];
+        env->truncations = &((unsigned char*)PyArray_DATA((PyArrayObject*)trunc_arr))[i];
         
         init(env);
         seed_rng(env, seed + i);  // Initialize per-env thread-safe RNG
