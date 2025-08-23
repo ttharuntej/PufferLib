@@ -181,8 +181,11 @@ struct Client {
 };
 
 // Curriculum constants (shared across observations and rewards)
-static const float TENDRIL_THRESHOLD_DEG[5] = {12.0f, 10.0f, 8.0f, 6.0f, 5.0f};
-static const float TENDRIL_HOLD_DURATIONS[5] = {0.4f, 0.6f, 0.8f, 1.2f, 2.0f};
+// Added an easier initial stage with a wide angular gate and short hold
+// requirement to smooth early learning.
+static const float TENDRIL_THRESHOLD_DEG[6] = {25.0f, 12.0f, 10.0f, 8.0f, 6.0f, 5.0f};
+static const float TENDRIL_HOLD_DURATIONS[6] = {0.2f, 0.4f, 0.6f, 0.8f, 1.2f, 2.0f};
+#define CURRICULUM_STAGES 6
 
 typedef struct Tendril Tendril;
 struct Tendril {
@@ -253,12 +256,12 @@ struct Tendril {
     float prev_dist_mm;      // previous distance to target for progress reward
     
     // Per-environment curriculum (reviewer's fix)
-    uint64_t steps;          // per-env step counter 
+    uint64_t steps;          // per-env step counter
     double sched_total_steps; // steps per this env to reach full difficulty
-    
-    // NEW: Hit-rate based curriculum
-    int curriculum_stage;    // 0..4 curriculum progression
-    float hit_rate_ema;      // exponential moving average of success rate
+
+    // NEW: Angular-error based curriculum
+    int curriculum_stage;    // 0..CURRICULUM_STAGES-1 progression
+    float ang_err_ema;       // EMA of per-episode angular error (deg)
     int episode_count;       // total episodes for this environment
     
     // NEW: Action smoothing and tracking
@@ -613,7 +616,7 @@ static inline void init(Tendril* env) {
 
     // NEW: Initialize curriculum/stats defaults for all builds (expert fix)
     env->curriculum_stage = 0;
-    env->hit_rate_ema = 0.0f;
+    env->ang_err_ema = 0.0f;
     env->episode_count = 0;
     env->steps = 0;
     env->sched_total_steps = 0.0;  // Legacy telemetry compatibility

@@ -165,7 +165,7 @@ void c_reset(Tendril* env) {
     // Initialize curriculum system on first episode
     if (env->episode_count == 1) {
         env->curriculum_stage = 0;
-        env->hit_rate_ema = 0.0f;
+        env->ang_err_ema = 0.0f;
     }
     
     // Reset control state every episode (not just episode 1)
@@ -436,13 +436,15 @@ void c_step(Tendril* env) {
         
         // NEW: Update hit-rate EMA and advance curriculum
         const float EMA_ALPHA = 0.05f;  // Smoothing factor
-        bool success = (env->ep_hit == 1);
-        env->hit_rate_ema = (1.0f - EMA_ALPHA) * env->hit_rate_ema + EMA_ALPHA * (success ? 1.0f : 0.0f);
-        
-        // Advance curriculum when stable performance achieved
-        if (env->curriculum_stage < 4 && env->episode_count >= 500 && env->hit_rate_ema >= 0.10f) {
+        float ep_ang = (env->ep_steps > 0) ? (env->ep_ang_sum / env->ep_steps) : 0.0f;
+        float ep_ang_deg = ep_ang * 180.0f / (float)M_PI;
+        env->ang_err_ema = (1.0f - EMA_ALPHA) * env->ang_err_ema + EMA_ALPHA * ep_ang_deg;
+
+        // Advance curriculum when average angular error is below gate threshold
+        if (env->curriculum_stage < CURRICULUM_STAGES - 1 &&
+            env->episode_count >= 500 &&
+            env->ang_err_ema <= thr_deg) {
             env->curriculum_stage++;
-            env->hit_rate_ema = 0.0f;  // Reset to prevent instant leap to next stage
             #if !defined(NDEBUG)
             printf("[CURRICULUM] Advanced to stage %d (episode %d)\n", env->curriculum_stage, env->episode_count);
             #endif
@@ -1564,7 +1566,7 @@ static PyObject* vec_log(PyObject* self, PyObject* args) {
         float gate_hold_s = TENDRIL_HOLD_DURATIONS[stage];
         
         PyDict_SetItemString(log_dict, "curriculum_stage", PyFloat_FromDouble((double)stage));
-        PyDict_SetItemString(log_dict, "hit_rate_ema", PyFloat_FromDouble(env->hit_rate_ema));
+        PyDict_SetItemString(log_dict, "ang_err_ema", PyFloat_FromDouble(env->ang_err_ema));
         PyDict_SetItemString(log_dict, "gate_thr_deg", PyFloat_FromDouble(gate_thr_deg));
         PyDict_SetItemString(log_dict, "gate_hold_s", PyFloat_FromDouble(gate_hold_s));
         
