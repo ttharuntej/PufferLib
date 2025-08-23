@@ -428,4 +428,8 @@ const char* target_label;  // was: char* target_label
 - **Final Critical Patch**: 4 remaining linkage landmines eliminated ✅
 - **Total**: 23 expert-identified issues resolved ✅
 
+### Servo Warmup for Curriculum Training
+- Added build-time flag `TENDRIL_SERVO_WARMUP` to bypass backlash and limit penalties during early episodes.
+- `_apply_servo_plant` skips nonlinear dynamics when warmup is active and gradually restores them as hit-rate improves.
+
 The Tendril environment is now ready for production deployment with absolute confidence.

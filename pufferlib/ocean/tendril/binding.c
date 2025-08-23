@@ -73,6 +73,7 @@ static inline int sgnf(float x) { return (x > 0.f) - (x < 0.f); }
 static void _apply_servo_plant(struct Tendril* env, const float action01[3], float dt)
 {
     int saturated_any = 0;
+    float nonlin = env->servo_nonlinearity;
 
     // Push commands into latency queues and pull delayed cmds
     float delayed_cmd_deg_s[3];
@@ -92,44 +93,54 @@ static void _apply_servo_plant(struct Tendril* env, const float action01[3], flo
         float v_ref = (1.f - CMD_LPF_ALPHA) * env->cmd_filt_deg_s[j] + CMD_LPF_ALPHA * delayed_cmd_deg_s[j];
         env->cmd_filt_deg_s[j] = v_ref;
 
-        // 2) Deadband
-        if (fabsf(v_ref) < VEL_DEADBAND_DEG_S) v_ref = 0.f;
+        if (nonlin > 0.f) {
+            // 2) Deadband
+            if (fabsf(v_ref) < VEL_DEADBAND_DEG_S * nonlin) v_ref = 0.f;
 
-        // 3) Backlash: on direction flip, consume BACKLASH_DEG of "gap"
-        int sign_now = sgnf(v_ref);
-        if (sign_now != 0 && sign_now != env->sign_prev[j]) {
-            env->backlash_remain_deg[j] = BACKLASH_DEG;
-            env->sign_prev[j] = sign_now;
+            // 3) Backlash: on direction flip, consume BACKLASH_DEG of "gap"
+            int sign_now = sgnf(v_ref);
+            if (sign_now != 0 && sign_now != env->sign_prev[j]) {
+                env->backlash_remain_deg[j] = BACKLASH_DEG * nonlin;
+                env->sign_prev[j] = sign_now;
+            }
+            if (env->backlash_remain_deg[j] > 0.f && v_ref != 0.f) {
+                float consume = fminf(fabsf(v_ref) * dt, env->backlash_remain_deg[j]);
+                env->backlash_remain_deg[j] -= consume;
+                // while backlash remains, do not move the output shaft
+                v_ref = 0.f;
+            }
+
+            // 4) Acceleration limiting
+            float dv = v_ref - env->joint_vel_deg_s[j];
+            float dv_max = JOINT_ACC_MAX_DEG[j] * dt;
+            dv_max = dv_max * nonlin + 1e6f * (1.f - nonlin);
+            if (dv > dv_max) { dv = dv_max; saturated_any = 1; }
+            if (dv < -dv_max){ dv = -dv_max; saturated_any = 1; }
+            env->joint_vel_deg_s[j] += dv;
+
+            // 5) Damping (viscous)
+            env->joint_vel_deg_s[j] *= (1.f - DAMPING_PER_SEC * dt * nonlin);
+
+            // 6) Velocity saturation
+            float vlim = JOINT_VEL_MAX_DEG[j] * nonlin + 1e6f * (1.f - nonlin);
+            if (env->joint_vel_deg_s[j] > vlim) { env->joint_vel_deg_s[j] = vlim; saturated_any = 1; }
+            if (env->joint_vel_deg_s[j] < -vlim){ env->joint_vel_deg_s[j] = -vlim; saturated_any = 1; }
+        } else {
+            // Linear warmup mode: directly integrate filtered command
+            env->joint_vel_deg_s[j] = v_ref;
         }
-        if (env->backlash_remain_deg[j] > 0.f && v_ref != 0.f) {
-            float consume = fminf(fabsf(v_ref) * dt, env->backlash_remain_deg[j]);
-            env->backlash_remain_deg[j] -= consume;
-            // while backlash remains, do not move the output shaft
-            v_ref = 0.f;
-        }
 
-        // 4) Acceleration limiting
-        float dv = v_ref - env->joint_vel_deg_s[j];
-        float dv_max = JOINT_ACC_MAX_DEG[j] * dt;
-        if (dv > dv_max) { dv = dv_max; saturated_any = 1; }
-        if (dv < -dv_max){ dv = -dv_max; saturated_any = 1; }
-        env->joint_vel_deg_s[j] += dv;
-
-        // 5) Damping (viscous)
-        env->joint_vel_deg_s[j] *= (1.f - DAMPING_PER_SEC * dt);
-        // 6) Velocity saturation
-        if (env->joint_vel_deg_s[j] > JOINT_VEL_MAX_DEG[j]) { env->joint_vel_deg_s[j] = JOINT_VEL_MAX_DEG[j]; saturated_any = 1; }
-        if (env->joint_vel_deg_s[j] < -JOINT_VEL_MAX_DEG[j]){ env->joint_vel_deg_s[j] = -JOINT_VEL_MAX_DEG[j]; saturated_any = 1; }
-
-        // 7) Integrate angle and clamp to joint limits
+        // 7) Integrate angle and clamp to joint limits when fully nonlinear
         env->joint_deg[j] += env->joint_vel_deg_s[j] * dt;
-        if (env->joint_deg[j] < JOINT_MIN_DEG[j]) { env->joint_deg[j] = JOINT_MIN_DEG[j]; saturated_any = 1; env->joint_vel_deg_s[j] = 0.f; }
-        if (env->joint_deg[j] > JOINT_MAX_DEG[j]) { env->joint_deg[j] = JOINT_MAX_DEG[j]; saturated_any = 1; env->joint_vel_deg_s[j] = 0.f; }
+        if (nonlin >= 1.f) {
+            if (env->joint_deg[j] < JOINT_MIN_DEG[j]) { env->joint_deg[j] = JOINT_MIN_DEG[j]; saturated_any = 1; env->joint_vel_deg_s[j] = 0.f; }
+            if (env->joint_deg[j] > JOINT_MAX_DEG[j]) { env->joint_deg[j] = JOINT_MAX_DEG[j]; saturated_any = 1; env->joint_vel_deg_s[j] = 0.f; }
+        }
     }
 
-    env->servo_saturated_step = saturated_any;
+    env->servo_saturated_step = (nonlin >= 1.f) ? saturated_any : 0;
     env->servo_steps += 1;
-    if (saturated_any) env->limit_hits += 1;
+    if (nonlin >= 1.f && saturated_any) env->limit_hits += 1;
 
     // Export back to the rest of the sim (FK expects radians)
     for (int j = 0; j < 3; ++j) {
@@ -167,6 +178,13 @@ void c_reset(Tendril* env) {
         env->curriculum_stage = 0;
         env->hit_rate_ema = 0.0f;
     }
+
+#if TENDRIL_SERVO_WARMUP
+    if (env->servo_nonlinearity < 1.0f && env->hit_rate_ema >= SERVO_NONLINEAR_TARGET_HIT_RATE) {
+        env->servo_nonlinearity += SERVO_NONLINEAR_STEP;
+        if (env->servo_nonlinearity > 1.0f) env->servo_nonlinearity = 1.0f;
+    }
+#endif
     
     // Reset control state every episode (not just episode 1)
     memset(env->last_actions, 0, sizeof(env->last_actions));
