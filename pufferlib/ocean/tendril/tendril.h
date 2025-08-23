@@ -598,7 +598,7 @@ static inline float compute_reward(Tendril* env) {
     float d_perp_ray  = (cosang >= 0.f) ? d_perp_line : r_mag;
     
     // ENHANCED COSINE REWARD: Make orientation matter from the start
-    float cos_term = 1.0f * cosang;                   // ↑ weight (was 2.0f forward bonus)
+    float cos_term = 1.5f * cosang;                   // increased per-step weight
     float perp_term = -0.005f * d_perp_ray;           // gentler (was -0.010f)
     float progress_term = 0.20f * fmaxf(0.f, d_err);  // keep same
     float back_pen = 0.05f * fmaxf(0.f, -cosang);     // lighter back penalty (was 0.2f)
@@ -614,13 +614,16 @@ static inline float compute_reward(Tendril* env) {
     }
     
     float shaped = cos_term + perp_term + progress_term - back_pen - proximity_penalty;
-    
+
     // Add small baseline for early episodes to prevent deep negative returns
     if (env->log.episodes < EASY_EPISODES) {
         shaped += 0.05f;  // Small positive baseline
     }
-    
-    env->rewards[0] = shaped;
+
+    // Normalize to roughly 0-1 range
+    float clamped = fmaxf(-1.f, fminf(1.f, shaped));
+    float normalized = 0.5f * (clamped + 1.0f);
+    env->rewards[0] = normalized;
     return env->rewards[0];
 }
 
