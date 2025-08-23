@@ -50,6 +50,19 @@ static const float JOINT_MAX_DEG[3]     = {175.f,120.f, 170.f};
 #define CMD_LATENCY_STEPS       2             // 2 * 10 ms = 20 ms latency
 #define DAMPING_PER_SEC         0.12f         // viscous damping (12%/s)
 
+// Optional servo warmup: set to 0 to always enable full dynamics
+#ifndef TENDRIL_SERVO_WARMUP
+#define TENDRIL_SERVO_WARMUP 1
+#endif
+
+// Hit-rate threshold and ramp step for re-enabling nonlinearity
+#ifndef SERVO_NONLINEAR_TARGET_HIT_RATE
+#define SERVO_NONLINEAR_TARGET_HIT_RATE 0.30f
+#endif
+#ifndef SERVO_NONLINEAR_STEP
+#define SERVO_NONLINEAR_STEP 0.25f
+#endif
+
 // HARDWARE-ACCURATE STL specifications (measured from actual files)
 #define BASE_WIDTH 60.0f      // Base.stl: 60×60×20mm (measured: -30 to +30)
 #define BASE_HEIGHT 60.0f
@@ -278,6 +291,9 @@ struct Tendril {
     float last_cmd_norm[3];       // last raw action [-1,1], for obs/debug
     int8_t sign_prev[3];          // previous command sign (-1,0,+1)
     float backlash_remain_deg[3]; // remaining backlash to consume [deg]
+
+    // Scale of servo nonlinearity [0=linear,1=full]
+    float servo_nonlinearity;
 
     // Simple fixed-latency queue per joint (command delay)
     float cmd_queue_deg_s[3][CMD_LATENCY_STEPS];
@@ -629,6 +645,13 @@ static inline void init(Tendril* env) {
         env->prev_joint_vel[i] = 0.0f;  // Previous velocities start at zero
         env->last_actions[i] = 0.0f;    // Previous actions start at zero
     }
+
+    // Servo nonlinearity disabled during warmup if configured
+#if TENDRIL_SERVO_WARMUP
+    env->servo_nonlinearity = 0.0f;
+#else
+    env->servo_nonlinearity = 1.0f;
+#endif
 }
 
 // Allocate memory for PufferLib interface
