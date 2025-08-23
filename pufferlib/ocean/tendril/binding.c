@@ -371,7 +371,8 @@ void c_step(Tendril* env) {
         env->stability_timer += TAU;
         if (env->stability_timer >= hold) {
             if (!env->success_bonus_given) {
-                step_reward += 50.0f;            // add success bonus once
+                // Success bonus scaled for normalized 0-1 rewards
+                step_reward += 0.5f;            // add success bonus once
                 env->success_bonus_given = true;
             }
             env->target_state = TARGET_SUCCESS;

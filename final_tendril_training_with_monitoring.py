@@ -178,7 +178,7 @@ def run_training():
     print("  ✅ Reward function: Now encourages movement (+2.5 reward boost)")
     print("  ✅ Servo physics: 15°/step (realistic speed)")
     print("  ✅ Action scaling: Consistent between training/eval")
-    print("  ✅ Success bonuses: Up to 37 points for reaching targets")
+    print("  ✅ Success bonus: ~0.5 for reaching targets (normalized scale)")
     print("=" * 60)
     
     try:
